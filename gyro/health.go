@@ -11,11 +11,23 @@ type HealthChecker interface {
 	// Check performs a health check on the given node.
 	Check(ctx context.Context, node Node) error
 
+	// AddNode adds a node to be monitored.
+	AddNode(node Node)
+
+	// RemoveNode removes a node from monitoring.
+	RemoveNode(nodeID string)
+
 	// StartMonitoring starts continuous health monitoring.
-	StartMonitoring(ctx context.Context, interval time.Duration)
+	StartMonitoring(ctx context.Context)
 
 	// StopMonitoring stops health monitoring.
 	StopMonitoring()
+
+	// IsNodeHealthy returns the current health status of a node.
+	IsNodeHealthy(nodeID string) bool
+
+	// AddHealthListener adds a health status change listener.
+	AddHealthListener(listener HealthListener)
 }
 
 type HealthCheckerConfig struct {
@@ -39,10 +51,15 @@ func DefaultHealthCheckerConfig() HealthCheckerConfig {
 type DefaultHealthChecker struct {
 	mu              sync.RWMutex
 	config          HealthCheckerConfig
+	nodes           map[string]Node // 自管理的节点列表
 	nodeStats       map[string]*NodeHealthStats
 	stopCh          chan struct{}
 	running         bool
 	healthListeners []HealthListener
+
+	// Worker pool for concurrent health checks
+	healthCheckChan chan Node
+	maxWorkers      int
 }
 
 type NodeHealthStats struct {
@@ -58,9 +75,13 @@ type HealthListener func(nodeID string, healthy bool)
 
 func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
 	return &DefaultHealthChecker{
-		config:    config,
-		nodeStats: make(map[string]*NodeHealthStats),
-		stopCh:    make(chan struct{}),
+		config:          config,
+		nodes:           make(map[string]Node),
+		nodeStats:       make(map[string]*NodeHealthStats),
+		stopCh:          make(chan struct{}),
+		healthListeners: make([]HealthListener, 0),
+		healthCheckChan: make(chan Node, 100), // Buffered channel for health check tasks
+		maxWorkers:      10,                   // Default worker pool size
 	}
 }
 
@@ -111,8 +132,34 @@ func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
 	return nil
 }
 
+// AddNode adds a node to be monitored.
+func (hc *DefaultHealthChecker) AddNode(node Node) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+
+	nodeID := node.ID()
+	hc.nodes[nodeID] = node
+
+	// Initialize health stats for the new node
+	if _, exists := hc.nodeStats[nodeID]; !exists {
+		hc.nodeStats[nodeID] = &NodeHealthStats{
+			IsHealthy:     true, // Assume healthy initially
+			LastCheckTime: time.Now(),
+		}
+	}
+}
+
+// RemoveNode removes a node from monitoring.
+func (hc *DefaultHealthChecker) RemoveNode(nodeID string) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+
+	delete(hc.nodes, nodeID)
+	delete(hc.nodeStats, nodeID)
+}
+
 // StartMonitoring starts continuous health monitoring.
-func (hc *DefaultHealthChecker) StartMonitoring(ctx context.Context, interval time.Duration) {
+func (hc *DefaultHealthChecker) StartMonitoring(ctx context.Context) {
 	hc.mu.Lock()
 	if hc.running {
 		hc.mu.Unlock()
@@ -121,7 +168,11 @@ func (hc *DefaultHealthChecker) StartMonitoring(ctx context.Context, interval ti
 	hc.running = true
 	hc.mu.Unlock()
 
-	go hc.monitoringLoop(ctx, interval)
+	// Start worker pool
+	hc.startWorkerPool(ctx)
+
+	// Start monitoring loop
+	go hc.monitoringLoop(ctx)
 }
 
 // StopMonitoring stops health monitoring.
@@ -156,12 +207,14 @@ func (hc *DefaultHealthChecker) UpdateConfig(newConfig HealthCheckerConfig) erro
 		// Restart with new interval if still enabled
 		if newConfig.Enabled {
 			hc.running = true
-			go hc.monitoringLoop(context.Background(), newConfig.Interval)
+			hc.startWorkerPool(context.Background())
+			go hc.monitoringLoop(context.Background())
 		}
 	} else if !oldConfig.Enabled && newConfig.Enabled && !hc.running {
 		// Health checking was disabled, now enabled
 		hc.running = true
-		go hc.monitoringLoop(context.Background(), newConfig.Interval)
+		hc.startWorkerPool(context.Background())
+		go hc.monitoringLoop(context.Background())
 	} else if oldConfig.Enabled && !newConfig.Enabled && hc.running {
 		// Health checking was enabled, now disabled
 		hc.running = false
@@ -219,16 +272,30 @@ func (hc *DefaultHealthChecker) GetNodeStats(nodeID string) *NodeHealthStats {
 	}
 }
 
-// RemoveNode removes health tracking for a node.
-func (hc *DefaultHealthChecker) RemoveNode(nodeID string) {
-	hc.mu.Lock()
-	defer hc.mu.Unlock()
-	delete(hc.nodeStats, nodeID)
+// startWorkerPool starts the worker pool for concurrent health checks.
+func (hc *DefaultHealthChecker) startWorkerPool(ctx context.Context) {
+	// Start worker goroutines
+	for i := 0; i < hc.maxWorkers; i++ {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-hc.stopCh:
+					return
+				case node := <-hc.healthCheckChan:
+					if node != nil {
+						hc.Check(ctx, node)
+					}
+				}
+			}
+		}()
+	}
 }
 
 // monitoringLoop runs the continuous health monitoring.
-func (hc *DefaultHealthChecker) monitoringLoop(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
+func (hc *DefaultHealthChecker) monitoringLoop(ctx context.Context) {
+	ticker := time.NewTicker(hc.config.Interval)
 	defer ticker.Stop()
 
 	for {
@@ -238,9 +305,24 @@ func (hc *DefaultHealthChecker) monitoringLoop(ctx context.Context, interval tim
 		case <-hc.stopCh:
 			return
 		case <-ticker.C:
-			// TODO:Need to be implemented with access to the actual nodes
-			// Need to pass the locator or nodes to monitor
-			// For now, this is a placeholder for the monitoring logic
+			// Get all nodes to check
+			hc.mu.RLock()
+			nodes := make([]Node, 0, len(hc.nodes))
+			for _, node := range hc.nodes {
+				nodes = append(nodes, node)
+			}
+			hc.mu.RUnlock()
+
+			// Queue health checks for all nodes
+			for _, node := range nodes {
+				select {
+				case hc.healthCheckChan <- node:
+					// Successfully queued
+				default:
+					// Channel is full, skip this check cycle for this node
+					// This prevents blocking and resource exhaustion
+				}
+			}
 		}
 	}
 }
@@ -351,14 +433,35 @@ func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 		return
 	}
 
-	// Start the monitoring loop with worker locator
-	hap.healthChecker.StartMonitoring(ctx, hap.healthChecker.config.Interval)
+	// Register all nodes from the locator to the health checker
+	nodes := hap.Locator.GetAllNodes()
+	for _, node := range nodes {
+		hap.healthChecker.AddNode(node)
+	}
+
+	// Add health listener to update our internal state
+	hap.healthChecker.AddHealthListener(func(nodeID string, healthy bool) {
+		hap.mu.Lock()
+		hap.healthyNodes[nodeID] = healthy
+		hap.mu.Unlock()
+
+		// Send event to channel for further processing
+		select {
+		case hap.healthEventChan <- HealthEvent{
+			NodeID:    nodeID,
+			Healthy:   healthy,
+			Timestamp: time.Now(),
+		}:
+		default:
+			// Channel is full, skip this event
+		}
+	})
+
+	// Start the health checker's own monitoring
+	hap.healthChecker.StartMonitoring(ctx)
 
 	// Start event-driven health management
 	go hap.startHealthEventProcessor(ctx)
-
-	// Start a goroutine to periodically check all nodes using worker locator
-	go hap.startHealthCheckWorkerPool(ctx)
 }
 
 // startHealthEventProcessor processes health events and updates internal state
@@ -405,49 +508,40 @@ func (hap *HealthAwarePool) processHealthEvent(event HealthEvent) {
 	// 4. Update metrics and monitoring systems
 }
 
-// startHealthCheckWorkerPool starts a worker locator for health checks to control concurrency
-func (hap *HealthAwarePool) startHealthCheckWorkerPool(ctx context.Context) {
-	// Create a worker locator with limited concurrency
-	const maxWorkers = 10
-	healthCheckChan := make(chan Node, 100)
-
-	// Start worker goroutines
-	for i := 0; i < maxWorkers; i++ {
-		go func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case node := <-healthCheckChan:
-					if node != nil {
-						hap.healthChecker.Check(ctx, node)
-					}
-				}
-			}
-		}()
+// AddNode adds a node to both the locator and health monitoring.
+func (hap *HealthAwarePool) AddNode(node Node) error {
+	// Add to underlying locator
+	if err := hap.Locator.AddNode(node); err != nil {
+		return err
 	}
 
-	// Periodically queue health checks
-	ticker := time.NewTicker(hap.healthChecker.config.Interval)
-	defer ticker.Stop()
+	// Add to health checker for monitoring
+	hap.healthChecker.AddNode(node)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			nodes := hap.Locator.GetAllNodes()
-			for _, node := range nodes {
-				select {
-				case healthCheckChan <- node:
-					// Successfully queued
-				default:
-					// Channel is full, skip this check cycle for this node
-					// This prevents blocking and resource exhaustion
-				}
-			}
-		}
+	// Initialize as healthy
+	hap.mu.Lock()
+	hap.healthyNodes[node.ID()] = true
+	hap.mu.Unlock()
+
+	return nil
+}
+
+// RemoveNode removes a node from both the locator and health monitoring.
+func (hap *HealthAwarePool) RemoveNode(nodeID string) error {
+	// Remove from underlying locator
+	if err := hap.Locator.RemoveNode(nodeID); err != nil {
+		return err
 	}
+
+	// Remove from health checker
+	hap.healthChecker.RemoveNode(nodeID)
+
+	// Remove from health tracking
+	hap.mu.Lock()
+	delete(hap.healthyNodes, nodeID)
+	hap.mu.Unlock()
+
+	return nil
 }
 
 // StopHealthMonitoring stops health monitoring.

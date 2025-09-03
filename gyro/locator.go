@@ -78,16 +78,16 @@ func NewConsistentLocator(config LocatorConfig) (*ConsistentLocator, error) {
 }
 
 // Get retrieves a node for the given key using consistent hashing.
-func (p *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+func (cl *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) {
+	cl.mu.RLock()
+	defer cl.mu.RUnlock()
 
-	if len(p.nodes) == 0 {
+	if len(cl.nodes) == 0 {
 		return nil, fmt.Errorf("no nodes available in ring")
 	}
 
 	// Use consistent hashing to find the node
-	nodeID, err := p.ring.LocateKey(ctx, []byte(key))
+	nodeID, err := cl.ring.LocateKey(ctx, []byte(key))
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func (p *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) {
 		return nil, fmt.Errorf("failed to locate node for key: %s", key)
 	}
 
-	node, exists := p.nodes[nodeID]
+	node, exists := cl.nodes[nodeID]
 	if !exists {
 		return nil, fmt.Errorf("node %s not found in ring", nodeID)
 	}
@@ -103,7 +103,7 @@ func (p *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) {
 	// Check if node is healthy
 	if !node.IsHealthy(ctx) {
 		// Try to find a replica
-		replicas, err := p.GetReplicas(ctx, key, 2)
+		replicas, err := cl.GetReplicas(ctx, key, 2)
 		if err != nil || len(replicas) < 2 {
 			return nil, fmt.Errorf("primary node %s is unhealthy and no healthy replicas found", nodeID)
 		}
@@ -120,11 +120,11 @@ func (p *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) {
 }
 
 // GetReplicas returns N nodes closest to the key for replication.
-func (p *ConsistentLocator) GetReplicas(ctx context.Context, key string, count int) ([]Node, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+func (cl *ConsistentLocator) GetReplicas(ctx context.Context, key string, count int) ([]Node, error) {
+	cl.mu.RLock()
+	defer cl.mu.RUnlock()
 
-	if len(p.nodes) == 0 {
+	if len(cl.nodes) == 0 {
 		return nil, fmt.Errorf("no nodes available in locator")
 	}
 
@@ -133,7 +133,7 @@ func (p *ConsistentLocator) GetReplicas(ctx context.Context, key string, count i
 	}
 
 	// Get replica node IDs from consistent hash ring
-	nodeIDs, err := p.ring.LocateReplicas(ctx, []byte(key), count)
+	nodeIDs, err := cl.ring.LocateReplicas(ctx, []byte(key), count)
 	if err != nil {
 		return nil, fmt.Errorf("failed to locate replicas for key %s: %w", key, err)
 	}
@@ -141,7 +141,7 @@ func (p *ConsistentLocator) GetReplicas(ctx context.Context, key string, count i
 	// Convert node IDs to Node objects
 	replicas := make([]Node, 0, len(nodeIDs))
 	for _, nodeID := range nodeIDs {
-		if node, exists := p.nodes[nodeID]; exists {
+		if node, exists := cl.nodes[nodeID]; exists {
 			replicas = append(replicas, node)
 		}
 	}
@@ -150,7 +150,7 @@ func (p *ConsistentLocator) GetReplicas(ctx context.Context, key string, count i
 }
 
 // AddNode adds a new node to the locator.
-func (p *ConsistentLocator) AddNode(node Node) error {
+func (cl *ConsistentLocator) AddNode(node Node) error {
 	if node == nil {
 		return fmt.Errorf("node cannot be nil")
 	}
@@ -160,42 +160,42 @@ func (p *ConsistentLocator) AddNode(node Node) error {
 		return fmt.Errorf("node ID cannot be empty")
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
 
 	// Check if node already exists
-	if _, exists := p.nodes[nodeID]; exists {
+	if _, exists := cl.nodes[nodeID]; exists {
 		return fmt.Errorf("node %s already exists in locator", nodeID)
 	}
 
 	// Add node to consistent hash ring
-	if err := p.ring.Add(context.Background(), nodeID); err != nil {
+	if err := cl.ring.Add(context.Background(), nodeID); err != nil {
 		return fmt.Errorf("failed to add node %s to consistent hash ring: %w", nodeID, err)
 	}
 
 	// Add node to local map
-	p.nodes[nodeID] = node
+	cl.nodes[nodeID] = node
 
 	return nil
 }
 
 // RemoveNode removes a node from the locator.
-func (p *ConsistentLocator) RemoveNode(nodeID string) error {
+func (cl *ConsistentLocator) RemoveNode(nodeID string) error {
 	if nodeID == "" {
 		return fmt.Errorf("node ID cannot be empty")
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
 
 	// Check if node exists
-	node, exists := p.nodes[nodeID]
+	node, exists := cl.nodes[nodeID]
 	if !exists {
 		return fmt.Errorf("node %s not found in locator", nodeID)
 	}
 
 	// Remove node from consistent hash ring
-	if err := p.ring.Remove(context.Background(), nodeID); err != nil {
+	if err := cl.ring.Remove(context.Background(), nodeID); err != nil {
 		return fmt.Errorf("failed to remove node %s from consistent hash ring: %w", nodeID, err)
 	}
 
@@ -206,18 +206,18 @@ func (p *ConsistentLocator) RemoveNode(nodeID string) error {
 	}
 
 	// Remove node from local map
-	delete(p.nodes, nodeID)
+	delete(cl.nodes, nodeID)
 
 	return nil
 }
 
 // GetAllNodes returns all nodes in the locator.
-func (p *ConsistentLocator) GetAllNodes() []Node {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+func (cl *ConsistentLocator) GetAllNodes() []Node {
+	cl.mu.RLock()
+	defer cl.mu.RUnlock()
 
-	nodes := make([]Node, 0, len(p.nodes))
-	for _, node := range p.nodes {
+	nodes := make([]Node, 0, len(cl.nodes))
+	for _, node := range cl.nodes {
 		nodes = append(nodes, node)
 	}
 
@@ -225,36 +225,36 @@ func (p *ConsistentLocator) GetAllNodes() []Node {
 }
 
 // Close closes all connections and releases resources.
-func (p *ConsistentLocator) Close() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (cl *ConsistentLocator) Close() error {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
 
 	var lastErr error
-	for nodeID, node := range p.nodes {
+	for nodeID, node := range cl.nodes {
 		if err := node.Close(); err != nil {
 			lastErr = fmt.Errorf("failed to close node %s: %w", nodeID, err)
 		}
 	}
 
 	// Clear all nodes
-	p.nodes = make(map[string]Node)
+	cl.nodes = make(map[string]Node)
 
 	return lastErr
 }
 
 // GetStats returns statistics about the locator.
-func (p *ConsistentLocator) GetStats() LocatorStats {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+func (cl *ConsistentLocator) GetStats() LocatorStats {
+	cl.mu.RLock()
+	defer cl.mu.RUnlock()
 
 	stats := LocatorStats{
-		TotalNodes:     len(p.nodes),
+		TotalNodes:     len(cl.nodes),
 		HealthyNodes:   0,
 		UnhealthyNodes: 0,
 	}
 
 	ctx := context.Background()
-	for _, node := range p.nodes {
+	for _, node := range cl.nodes {
 		if node.IsHealthy(ctx) {
 			stats.HealthyNodes++
 		} else {
