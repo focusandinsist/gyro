@@ -239,7 +239,7 @@ func (hc *DefaultHealthChecker) monitoringLoop(ctx context.Context, interval tim
 			return
 		case <-ticker.C:
 			// TODO:Need to be implemented with access to the actual nodes
-			// Need to pass the pool or nodes to monitor
+			// Need to pass the locator or nodes to monitor
 			// For now, this is a placeholder for the monitoring logic
 		}
 	}
@@ -261,26 +261,26 @@ type HealthEvent struct {
 
 // HealthAwarePool wraps a Pool with health checking capabilities.
 type HealthAwarePool struct {
-	Pool
+	Locator
 	healthChecker   *DefaultHealthChecker
 	healthyNodes    map[string]bool
 	healthEventChan chan HealthEvent
 	mu              sync.RWMutex
 }
 
-// NewHealthAwarePool creates a new health-aware pool.
-func NewHealthAwarePool(pool Pool, config HealthCheckerConfig) *HealthAwarePool {
+// NewHealthAwarePool creates a new health-aware locator.
+func NewHealthAwarePool(locator Locator, config HealthCheckerConfig) *HealthAwarePool {
 	healthChecker := NewDefaultHealthChecker(config)
 
 	hap := &HealthAwarePool{
-		Pool:            pool,
+		Locator:         locator,
 		healthChecker:   healthChecker,
 		healthyNodes:    make(map[string]bool),
 		healthEventChan: make(chan HealthEvent, 100), // Buffered channel for health events
 	}
 
 	// Initialize all nodes as healthy
-	for _, node := range pool.GetAllNodes() {
+	for _, node := range locator.GetAllNodes() {
 		hap.healthyNodes[node.ID()] = true
 	}
 
@@ -307,7 +307,7 @@ func NewHealthAwarePool(pool Pool, config HealthCheckerConfig) *HealthAwarePool 
 // Get retrieves a healthy node for the given key.
 func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 	// Fast path: get the primary node
-	node, err := hap.Pool.Get(ctx, key)
+	node, err := hap.Locator.Get(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +322,7 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 	}
 
 	// Node is known to be unhealthy, try replicas
-	replicas, err := hap.Pool.GetReplicas(ctx, key, 3)
+	replicas, err := hap.Locator.GetReplicas(ctx, key, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -345,19 +345,19 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 	return node, nil
 }
 
-// StartHealthMonitoring starts health monitoring for all nodes in the pool.
+// StartHealthMonitoring starts health monitoring for all nodes in the locator.
 func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 	if !hap.healthChecker.config.Enabled {
 		return
 	}
 
-	// Start the monitoring loop with worker pool
+	// Start the monitoring loop with worker locator
 	hap.healthChecker.StartMonitoring(ctx, hap.healthChecker.config.Interval)
 
 	// Start event-driven health management
 	go hap.startHealthEventProcessor(ctx)
 
-	// Start a goroutine to periodically check all nodes using worker pool
+	// Start a goroutine to periodically check all nodes using worker locator
 	go hap.startHealthCheckWorkerPool(ctx)
 }
 
@@ -405,9 +405,9 @@ func (hap *HealthAwarePool) processHealthEvent(event HealthEvent) {
 	// 4. Update metrics and monitoring systems
 }
 
-// startHealthCheckWorkerPool starts a worker pool for health checks to control concurrency
+// startHealthCheckWorkerPool starts a worker locator for health checks to control concurrency
 func (hap *HealthAwarePool) startHealthCheckWorkerPool(ctx context.Context) {
-	// Create a worker pool with limited concurrency
+	// Create a worker locator with limited concurrency
 	const maxWorkers = 10
 	healthCheckChan := make(chan Node, 100)
 
@@ -436,7 +436,7 @@ func (hap *HealthAwarePool) startHealthCheckWorkerPool(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			nodes := hap.Pool.GetAllNodes()
+			nodes := hap.Locator.GetAllNodes()
 			for _, node := range nodes {
 				select {
 				case healthCheckChan <- node:
@@ -514,11 +514,11 @@ func (hap *HealthAwarePool) IsNodeHealthy(nodeID string) bool {
 	return !exists || healthy // Default to healthy if unknown
 }
 
-// Close closes the pool and stops health monitoring.
+// Close closes the locator and stops health monitoring.
 func (hap *HealthAwarePool) Close() error {
 	hap.StopHealthMonitoring()
 	close(hap.healthEventChan)
-	return hap.Pool.Close()
+	return hap.Locator.Close()
 }
 
 // LoadBalancer provides load balancing strategies for node selection.

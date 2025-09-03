@@ -15,7 +15,7 @@ type Node interface {
 	Close() error
 }
 
-type Pool interface {
+type Locator interface {
 	Get(ctx context.Context, key string) (Node, error)
 	GetReplicas(ctx context.Context, key string, count int) ([]Node, error)
 	AddNode(node Node) error
@@ -24,15 +24,15 @@ type Pool interface {
 	Close() error
 }
 
-type PoolConfig struct {
+type LocatorConfig struct {
 	PartitionCount    int     `json:"partition_count"`
 	ReplicationFactor int     `json:"replication_factor"`
 	Load              float64 `json:"load"`
 	HashFunction      string  `json:"hash_function"`
 }
 
-func DefaultPoolConfig() PoolConfig {
-	return PoolConfig{
+func DefaultLocatorConfig() LocatorConfig {
+	return LocatorConfig{
 		PartitionCount:    271,
 		ReplicationFactor: 20,
 		Load:              1.25,
@@ -40,14 +40,14 @@ func DefaultPoolConfig() PoolConfig {
 	}
 }
 
-type ConsistentPool struct {
+type ConsistentLocator struct {
 	mu     sync.RWMutex
 	nodes  map[string]Node
 	ring   *consistent.Consistent
-	config PoolConfig
+	config LocatorConfig
 }
 
-func NewConsistentPool(config PoolConfig) (*ConsistentPool, error) {
+func NewConsistentLocator(config LocatorConfig) (*ConsistentLocator, error) {
 	var hasher consistent.Hasher
 	switch config.HashFunction {
 	case "fnv":
@@ -70,7 +70,7 @@ func NewConsistentPool(config PoolConfig) (*ConsistentPool, error) {
 		return nil, fmt.Errorf("failed to create consistent hash ring: %w", err)
 	}
 
-	return &ConsistentPool{
+	return &ConsistentLocator{
 		nodes:  make(map[string]Node),
 		ring:   ring,
 		config: config,
@@ -78,12 +78,12 @@ func NewConsistentPool(config PoolConfig) (*ConsistentPool, error) {
 }
 
 // Get retrieves a node for the given key using consistent hashing.
-func (p *ConsistentPool) Get(ctx context.Context, key string) (Node, error) {
+func (p *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	if len(p.nodes) == 0 {
-		return nil, fmt.Errorf("no nodes available in pool")
+		return nil, fmt.Errorf("no nodes available in ring")
 	}
 
 	// Use consistent hashing to find the node
@@ -97,7 +97,7 @@ func (p *ConsistentPool) Get(ctx context.Context, key string) (Node, error) {
 
 	node, exists := p.nodes[nodeID]
 	if !exists {
-		return nil, fmt.Errorf("node %s not found in pool", nodeID)
+		return nil, fmt.Errorf("node %s not found in ring", nodeID)
 	}
 
 	// Check if node is healthy
@@ -120,12 +120,12 @@ func (p *ConsistentPool) Get(ctx context.Context, key string) (Node, error) {
 }
 
 // GetReplicas returns N nodes closest to the key for replication.
-func (p *ConsistentPool) GetReplicas(ctx context.Context, key string, count int) ([]Node, error) {
+func (p *ConsistentLocator) GetReplicas(ctx context.Context, key string, count int) ([]Node, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	if len(p.nodes) == 0 {
-		return nil, fmt.Errorf("no nodes available in pool")
+		return nil, fmt.Errorf("no nodes available in locator")
 	}
 
 	if count <= 0 {
@@ -149,8 +149,8 @@ func (p *ConsistentPool) GetReplicas(ctx context.Context, key string, count int)
 	return replicas, nil
 }
 
-// AddNode adds a new node to the pool.
-func (p *ConsistentPool) AddNode(node Node) error {
+// AddNode adds a new node to the locator.
+func (p *ConsistentLocator) AddNode(node Node) error {
 	if node == nil {
 		return fmt.Errorf("node cannot be nil")
 	}
@@ -165,7 +165,7 @@ func (p *ConsistentPool) AddNode(node Node) error {
 
 	// Check if node already exists
 	if _, exists := p.nodes[nodeID]; exists {
-		return fmt.Errorf("node %s already exists in pool", nodeID)
+		return fmt.Errorf("node %s already exists in locator", nodeID)
 	}
 
 	// Add node to consistent hash ring
@@ -179,8 +179,8 @@ func (p *ConsistentPool) AddNode(node Node) error {
 	return nil
 }
 
-// RemoveNode removes a node from the pool.
-func (p *ConsistentPool) RemoveNode(nodeID string) error {
+// RemoveNode removes a node from the locator.
+func (p *ConsistentLocator) RemoveNode(nodeID string) error {
 	if nodeID == "" {
 		return fmt.Errorf("node ID cannot be empty")
 	}
@@ -191,7 +191,7 @@ func (p *ConsistentPool) RemoveNode(nodeID string) error {
 	// Check if node exists
 	node, exists := p.nodes[nodeID]
 	if !exists {
-		return fmt.Errorf("node %s not found in pool", nodeID)
+		return fmt.Errorf("node %s not found in locator", nodeID)
 	}
 
 	// Remove node from consistent hash ring
@@ -211,8 +211,8 @@ func (p *ConsistentPool) RemoveNode(nodeID string) error {
 	return nil
 }
 
-// GetAllNodes returns all nodes in the pool.
-func (p *ConsistentPool) GetAllNodes() []Node {
+// GetAllNodes returns all nodes in the locator.
+func (p *ConsistentLocator) GetAllNodes() []Node {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -225,7 +225,7 @@ func (p *ConsistentPool) GetAllNodes() []Node {
 }
 
 // Close closes all connections and releases resources.
-func (p *ConsistentPool) Close() error {
+func (p *ConsistentLocator) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -242,12 +242,12 @@ func (p *ConsistentPool) Close() error {
 	return lastErr
 }
 
-// GetStats returns statistics about the pool.
-func (p *ConsistentPool) GetStats() PoolStats {
+// GetStats returns statistics about the locator.
+func (p *ConsistentLocator) GetStats() LocatorStats {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	stats := PoolStats{
+	stats := LocatorStats{
 		TotalNodes:     len(p.nodes),
 		HealthyNodes:   0,
 		UnhealthyNodes: 0,
@@ -265,8 +265,8 @@ func (p *ConsistentPool) GetStats() PoolStats {
 	return stats
 }
 
-// PoolStats contains statistics about a pool.
-type PoolStats struct {
+// LocatorStats contains statistics about a locator.
+type LocatorStats struct {
 	TotalNodes     int `json:"total_nodes"`
 	HealthyNodes   int `json:"healthy_nodes"`
 	UnhealthyNodes int `json:"unhealthy_nodes"`

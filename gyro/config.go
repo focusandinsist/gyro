@@ -7,8 +7,8 @@ import (
 // ClientConfig the configuration for Gyro clients.
 // This is a composition of individual component configurations.
 type ClientConfig struct {
-	// Pool configures the connection pool behavior.
-	Pool PoolConfig `json:"pool"`
+	// Locator configures the connection locator behavior.
+	Locator LocatorConfig `json:"locator"`
 
 	// HealthChecker configures health checking behavior.
 	HealthChecker HealthCheckerConfig `json:"health_checker"`
@@ -53,7 +53,7 @@ func DefaultConnectionConfig() ConnectionConfig {
 // DefaultClientConfig .
 func DefaultClientConfig() *ClientConfig {
 	return &ClientConfig{
-		Pool:          DefaultPoolConfig(),
+		Locator:       DefaultLocatorConfig(),
 		HealthChecker: DefaultHealthCheckerConfig(),
 		Connection:    DefaultConnectionConfig(),
 	}

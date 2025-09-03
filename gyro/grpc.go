@@ -77,20 +77,20 @@ func (gn *GRPCNode) GetNativeClient() interface{} {
 }
 
 type GRPCClientConfig struct {
-	Pool       PoolConfig       `json:"pool"`
+	Locator    LocatorConfig    `json:"locator"`
 	Connection ConnectionConfig `json:"connection"`
 }
 
 func DefaultGRPCClientConfig() *GRPCClientConfig {
 	return &GRPCClientConfig{
-		Pool:       DefaultPoolConfig(),
+		Locator:    DefaultLocatorConfig(),
 		Connection: DefaultConnectionConfig(),
 	}
 }
 
 type GRPCClient struct {
-	pool   Pool
-	config *GRPCClientConfig
+	locator Locator
+	config  *GRPCClientConfig
 }
 
 func NewGRPCClient(addresses []string, config *GRPCClientConfig) (*GRPCClient, error) {
@@ -98,13 +98,13 @@ func NewGRPCClient(addresses []string, config *GRPCClientConfig) (*GRPCClient, e
 		config = DefaultGRPCClientConfig()
 	}
 
-	// Create the connection pool
-	pool, err := NewConsistentPool(config.Pool)
+	// Create the connection locator
+	locator, err := NewConsistentLocator(config.Locator)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create connection pool: %w", err)
+		return nil, fmt.Errorf("failed to create connection locator: %w", err)
 	}
 
-	// Create gRPC nodes and add them to the pool
+	// Create gRPC nodes and add them to the locator
 	for i, address := range addresses {
 		nodeID := fmt.Sprintf("grpc-%d", i)
 
@@ -115,22 +115,22 @@ func NewGRPCClient(addresses []string, config *GRPCClientConfig) (*GRPCClient, e
 		}
 
 		node := NewGRPCNode(nodeID, address, conn)
-		if err := pool.AddNode(node); err != nil {
-			pool.Close()
+		if err := locator.AddNode(node); err != nil {
+			locator.Close()
 			return nil, fmt.Errorf("failed to add gRPC node %s: %w", nodeID, err)
 		}
 	}
 
 	return &GRPCClient{
-		pool:   pool,
-		config: config,
+		locator: locator,
+		config:  config,
 	}, nil
 }
 
 // GetClientForKey returns the native gRPC client for the given key.
 // Routes the key to the correct gRPC node and returns the native client for direct use.
 func (gc *GRPCClient) GetClientForKey(ctx context.Context, key string) (interface{}, error) {
-	node, err := gc.pool.Get(ctx, key)
+	node, err := gc.locator.Get(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("gyro: failed to get node for key '%s': %w", key, err)
 	}
@@ -150,7 +150,7 @@ func (gc *GRPCClient) GetClientForKey(ctx context.Context, key string) (interfac
 
 // GetClientsForReplicas returns native gRPC clients for replica nodes.
 func (gc *GRPCClient) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]interface{}, error) {
-	nodes, err := gc.pool.GetReplicas(ctx, key, replicaCount)
+	nodes, err := gc.locator.GetReplicas(ctx, key, replicaCount)
 	if err != nil {
 		return nil, fmt.Errorf("gyro: failed to get replicas for key '%s': %w", key, err)
 	}
@@ -173,7 +173,7 @@ func (gc *GRPCClient) GetClientsForReplicas(ctx context.Context, key string, rep
 
 // GetAllClients returns native gRPC clients for all nodes.
 func (gc *GRPCClient) GetAllClients() map[string]interface{} {
-	nodes := gc.pool.GetAllNodes()
+	nodes := gc.locator.GetAllNodes()
 	clients := make(map[string]interface{})
 
 	for _, node := range nodes {
@@ -193,7 +193,7 @@ func (gc *GRPCClient) GetAllClients() map[string]interface{} {
 
 // Close closes all connections and releases resources.
 func (gc *GRPCClient) Close() error {
-	return gc.pool.Close()
+	return gc.locator.Close()
 }
 
 type MockGRPCConnection struct {

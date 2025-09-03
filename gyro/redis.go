@@ -79,21 +79,21 @@ func (rn *RedisNode) GetNativeClient() interface{} {
 }
 
 type RedisClientConfig struct {
-	Pool       PoolConfig       `json:"pool"`
+	Locator    LocatorConfig    `json:"locator"`
 	Connection ConnectionConfig `json:"connection"`
 }
 
 func DefaultRedisClientConfig() *RedisClientConfig {
 	return &RedisClientConfig{
-		Pool:       DefaultPoolConfig(),
+		Locator:    DefaultLocatorConfig(),
 		Connection: DefaultConnectionConfig(),
 	}
 }
 
 // RedisClient routes requests to Redis cluster nodes.
 type RedisClient struct {
-	pool   Pool
-	config *RedisClientConfig
+	locator Locator
+	config  *RedisClientConfig
 }
 
 func NewRedisClient(addresses []string, config *RedisClientConfig) (*RedisClient, error) {
@@ -101,9 +101,9 @@ func NewRedisClient(addresses []string, config *RedisClientConfig) (*RedisClient
 		config = DefaultRedisClientConfig()
 	}
 
-	pool, err := NewConsistentPool(config.Pool)
+	locator, err := NewConsistentLocator(config.Locator)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create connection pool: %w", err)
+		return nil, fmt.Errorf("failed to create connection locator: %w", err)
 	}
 
 	for i, address := range addresses {
@@ -116,20 +116,20 @@ func NewRedisClient(addresses []string, config *RedisClientConfig) (*RedisClient
 		}
 
 		node := NewRedisNode(nodeID, address, conn)
-		if err := pool.AddNode(node); err != nil {
-			pool.Close()
+		if err := locator.AddNode(node); err != nil {
+			locator.Close()
 			return nil, fmt.Errorf("failed to add Redis node %s: %w", nodeID, err)
 		}
 	}
 
 	return &RedisClient{
-		pool:   pool,
-		config: config,
+		locator: locator,
+		config:  config,
 	}, nil
 }
 
 func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (interface{}, error) {
-	node, err := rc.pool.Get(ctx, key)
+	node, err := rc.locator.Get(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node for key '%s': %w", key, err)
 	}
@@ -148,7 +148,7 @@ func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (interfa
 }
 
 func (rc *RedisClient) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]interface{}, error) {
-	nodes, err := rc.pool.GetReplicas(ctx, key, replicaCount)
+	nodes, err := rc.locator.GetReplicas(ctx, key, replicaCount)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get replicas for key '%s': %w", key, err)
 	}
@@ -170,7 +170,7 @@ func (rc *RedisClient) GetClientsForReplicas(ctx context.Context, key string, re
 }
 
 func (rc *RedisClient) GetAllClients() map[string]interface{} {
-	nodes := rc.pool.GetAllNodes()
+	nodes := rc.locator.GetAllNodes()
 	clients := make(map[string]interface{})
 
 	for _, node := range nodes {
@@ -190,7 +190,7 @@ func (rc *RedisClient) GetAllClients() map[string]interface{} {
 
 // Close closes all connections and releases resources.
 func (rc *RedisClient) Close() error {
-	return rc.pool.Close()
+	return rc.locator.Close()
 }
 
 type MockNativeRedisClient struct {
