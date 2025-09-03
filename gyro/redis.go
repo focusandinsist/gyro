@@ -268,3 +268,7 @@ func (mrc *MockRedisConnection) Close() error {
 func (mrc *MockRedisConnection) IsConnected() bool {
 	return mrc.connected
 }
+
+func NewRedisCluster(addresses []string) (*RedisClient, error) {
+	return NewRedisClient(addresses, nil)
+}

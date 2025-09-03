@@ -6,6 +6,18 @@ import (
 	"time"
 )
 
+// HealthChecker provides health checking capabilities for nodes.
+type HealthChecker interface {
+	// Check performs a health check on the given node.
+	Check(ctx context.Context, node Node) error
+
+	// StartMonitoring starts continuous health monitoring.
+	StartMonitoring(ctx context.Context, interval time.Duration)
+
+	// StopMonitoring stops health monitoring.
+	StopMonitoring()
+}
+
 type HealthCheckerConfig struct {
 	Enabled           bool          `json:"enabled"`
 	Interval          time.Duration `json:"interval"`
@@ -507,4 +519,14 @@ func (hap *HealthAwarePool) Close() error {
 	hap.StopHealthMonitoring()
 	close(hap.healthEventChan)
 	return hap.Pool.Close()
+}
+
+// LoadBalancer provides load balancing strategies for node selection.
+// Unused for now.
+type LoadBalancer interface {
+	// Select selects the best node from the given candidates.
+	Select(ctx context.Context, nodes []Node, key string) (Node, error)
+
+	// UpdateStats updates the load statistics for a node.
+	UpdateStats(nodeID string, latency time.Duration, success bool)
 }

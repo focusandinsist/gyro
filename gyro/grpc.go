@@ -233,3 +233,7 @@ func (mgc *MockGRPCConnection) GetState() string {
 	defer mgc.mu.RUnlock()
 	return mgc.state
 }
+
+func NewGRPCCluster(addresses []string) (*GRPCClient, error) {
+	return NewGRPCClient(addresses, nil)
+}

@@ -8,6 +8,22 @@ import (
 	"github.com/focusandinsist/consistent-go/consistent"
 )
 
+type Node interface {
+	ID() string
+	Address() string
+	IsHealthy(ctx context.Context) bool
+	Close() error
+}
+
+type Pool interface {
+	Get(ctx context.Context, key string) (Node, error)
+	GetReplicas(ctx context.Context, key string, count int) ([]Node, error)
+	AddNode(node Node) error
+	RemoveNode(nodeID string) error
+	GetAllNodes() []Node
+	Close() error
+}
+
 type PoolConfig struct {
 	PartitionCount    int     `json:"partition_count"`
 	ReplicationFactor int     `json:"replication_factor"`
