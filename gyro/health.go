@@ -51,7 +51,7 @@ func DefaultHealthCheckerConfig() HealthCheckerConfig {
 type DefaultHealthChecker struct {
 	mu              sync.RWMutex
 	config          HealthCheckerConfig
-	nodes           map[string]Node // 自管理的节点列表
+	nodes           map[string]Node
 	nodeStats       map[string]*NodeHealthStats
 	stopCh          chan struct{}
 	running         bool
