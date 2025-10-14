@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // NodeInfo contains information about a service node.
@@ -137,16 +138,31 @@ func (ssd *StaticServiceDiscovery) SetNodes(serviceName string, nodes []NodeInfo
 	ssd.services[serviceName] = nodesCopy
 }
 
+// ClientHealth represents the health status of the client
+type ClientHealth struct {
+	ServiceDiscoveryHealthy   bool      `json:"service_discovery_healthy"`
+	LastServiceDiscoveryError string    `json:"last_service_discovery_error,omitempty"`
+	ServiceDiscoveryRetries   int       `json:"service_discovery_retries"`
+	LastHealthCheck           time.Time `json:"last_health_check"`
+}
+
 // Client provides configuration and service discovery.
 type Client struct {
 	mu            sync.RWMutex
 	locator       Locator
+	healthChecker HealthChecker
 	serviceName   string
 	discovery     ServiceDiscovery
 	configManager *ConfigManager
 	stopCh        chan struct{}
 	running       bool
 	nodeFactory   NodeFactory
+
+	// Health tracking
+	healthMu                  sync.RWMutex
+	serviceDiscoveryHealthy   bool
+	lastServiceDiscoveryError string
+	serviceDiscoveryRetries   int
 }
 
 // NodeFactory creates nodes from NodeInfo.
@@ -154,8 +170,8 @@ type NodeFactory interface {
 	CreateNode(info NodeInfo) (Node, error)
 }
 
-// NewClient creates a new client.
-func NewClient(serviceName string, discovery ServiceDiscovery, configManager *ConfigManager, nodeFactory NodeFactory) (*Client, error) {
+// NewClient creates a new client with dependency injection.
+func NewClient(serviceName string, discovery ServiceDiscovery, configManager *ConfigManager, nodeFactory NodeFactory, healthChecker HealthChecker) (*Client, error) {
 	if serviceName == "" {
 		return nil, fmt.Errorf("service name cannot be empty")
 	}
@@ -168,13 +184,20 @@ func NewClient(serviceName string, discovery ServiceDiscovery, configManager *Co
 	if nodeFactory == nil {
 		return nil, fmt.Errorf("node factory cannot be nil")
 	}
+	if healthChecker == nil {
+		return nil, fmt.Errorf("health checker cannot be nil")
+	}
 
 	client := &Client{
 		serviceName:   serviceName,
 		discovery:     discovery,
 		configManager: configManager,
 		nodeFactory:   nodeFactory,
+		healthChecker: healthChecker,
 		stopCh:        make(chan struct{}),
+
+		// Initialize health status
+		serviceDiscoveryHealthy: false, // Will be set to true when watch is established
 	}
 
 	if err := client.initialize(); err != nil {
@@ -194,27 +217,30 @@ func (c *Client) initializeUnsafe() error {
 		return fmt.Errorf("failed to discover initial nodes: %w", err)
 	}
 
-	// Create locator
+	// Create base locator
 	config := c.configManager.GetConfig()
-	locator, err := NewConsistentLocator(config.Locator)
+	baseLocator, err := NewConsistentLocator(config.Locator)
 	if err != nil {
 		return fmt.Errorf("failed to create locator: %w", err)
 	}
 
-	// Add nodes to locator
+	// Add nodes to base locator
 	for _, nodeInfo := range nodeInfos {
 		node, err := c.nodeFactory.CreateNode(nodeInfo)
 		if err != nil {
 			return fmt.Errorf("failed to create node %s: %w", nodeInfo.ID, err)
 		}
 
-		if err := locator.AddNode(node); err != nil {
+		if err := baseLocator.AddNode(node); err != nil {
 			return fmt.Errorf("failed to add node %s to locator: %w", nodeInfo.ID, err)
 		}
 	}
 
-	// Store the locator directly
-	c.locator = locator
+	// Wrap with HealthAwarePool using injected HealthChecker
+	healthAwarePool := NewHealthAwarePoolWithChecker(baseLocator, c.healthChecker)
+
+	// Store the health-aware locator
+	c.locator = healthAwarePool
 
 	return nil
 }
@@ -305,13 +331,55 @@ func (c *Client) Close() error {
 	return c.Stop()
 }
 
-// watchServiceNodes watches for service node changes.
-func (c *Client) watchServiceNodes(ctx context.Context) {
-	nodesCh, err := c.discovery.Watch(ctx, c.serviceName)
-	if err != nil {
-		fmt.Printf("Failed to watch service nodes: %v\n", err)
-		return
+// Health returns the current health status of the client
+func (c *Client) Health() *ClientHealth {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+
+	return &ClientHealth{
+		ServiceDiscoveryHealthy:   c.serviceDiscoveryHealthy,
+		LastServiceDiscoveryError: c.lastServiceDiscoveryError,
+		ServiceDiscoveryRetries:   c.serviceDiscoveryRetries,
+		LastHealthCheck:           time.Now(),
 	}
+}
+
+// IsHealthy returns true if the client is healthy
+func (c *Client) IsHealthy() bool {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+	return c.serviceDiscoveryHealthy
+}
+
+// updateServiceDiscoveryHealth updates the service discovery health status
+func (c *Client) updateServiceDiscoveryHealth(healthy bool, err error) {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	c.serviceDiscoveryHealthy = healthy
+	if err != nil {
+		c.lastServiceDiscoveryError = err.Error()
+		if !healthy {
+			c.serviceDiscoveryRetries++
+		}
+	} else {
+		c.lastServiceDiscoveryError = ""
+		if healthy {
+			c.serviceDiscoveryRetries = 0 // Reset retries on success
+		}
+	}
+}
+
+// watchServiceNodes watches for service node changes with retry mechanism.
+func (c *Client) watchServiceNodes(ctx context.Context) {
+	const (
+		maxRetries    = 10
+		baseDelay     = time.Second
+		maxDelay      = time.Minute
+		backoffFactor = 2.0
+	)
+
+	retryCount := 0
 
 	for {
 		select {
@@ -319,9 +387,71 @@ func (c *Client) watchServiceNodes(ctx context.Context) {
 			return
 		case <-c.stopCh:
 			return
+		default:
+		}
+
+		// Attempt to watch service nodes
+		nodesCh, err := c.discovery.Watch(ctx, c.serviceName)
+		if err != nil {
+			c.updateServiceDiscoveryHealth(false, err)
+			fmt.Printf("Failed to watch service nodes (attempt %d/%d): %v\n", retryCount+1, maxRetries, err)
+
+			retryCount++
+			if retryCount >= maxRetries {
+				fmt.Printf("Max retries reached for service discovery, giving up\n")
+				return
+			}
+
+			// Exponential backoff
+			multiplier := 1
+			for i := 0; i < retryCount; i++ {
+				multiplier *= 2
+			}
+			delay := time.Duration(int64(baseDelay) * int64(multiplier))
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.stopCh:
+				return
+			case <-time.After(delay):
+				continue
+			}
+		}
+
+		// Successfully established watch, reset retry count and mark healthy
+		retryCount = 0
+		c.updateServiceDiscoveryHealth(true, nil)
+		fmt.Printf("Successfully established service discovery watch\n")
+
+		// Process events from the watch channel
+		watchFailed := c.processServiceWatch(ctx, nodesCh)
+		if !watchFailed {
+			// Normal shutdown, don't retry
+			return
+		}
+
+		// Watch failed, will retry after backoff
+		c.updateServiceDiscoveryHealth(false, fmt.Errorf("service discovery watch channel closed unexpectedly"))
+		fmt.Printf("Service discovery watch failed, will retry...\n")
+	}
+}
+
+// processServiceWatch processes events from the service discovery watch channel
+// Returns true if the watch failed and should be retried, false for normal shutdown
+func (c *Client) processServiceWatch(ctx context.Context, nodesCh <-chan []NodeInfo) bool {
+	for {
+		select {
+		case <-ctx.Done():
+			return false // Normal shutdown
+		case <-c.stopCh:
+			return false // Normal shutdown
 		case nodes, ok := <-nodesCh:
 			if !ok {
-				return
+				return true // Channel closed, should retry
 			}
 			c.handleServiceNodesChange(nodes)
 		}
@@ -520,34 +650,13 @@ func (c *Client) connectionConfigEqual(old, new ConnectionConfig) bool {
 
 // updateHealthCheckerConfig updates the health checker configuration
 func (c *Client) updateHealthCheckerConfig(newConfig HealthCheckerConfig) error {
-	// Try to get the health checker from the client
-	healthAwarePool := c.getHealthAwarePool()
-	if healthAwarePool != nil {
-		// Update the health checker configuration
-		if err := healthAwarePool.UpdateHealthCheckerConfig(newConfig); err != nil {
-			return fmt.Errorf("failed to update health checker config: %w", err)
-		}
-		fmt.Printf("Successfully updated health checker config: enabled=%v, interval=%v, timeout=%v\n",
-			newConfig.Enabled, newConfig.Interval, newConfig.Timeout)
-	} else {
-		// No health-aware locator available, just log
-		fmt.Printf("No health-aware locator available, config update logged: enabled=%v, interval=%v, timeout=%v\n",
-			newConfig.Enabled, newConfig.Interval, newConfig.Timeout)
+	// Directly update the injected health checker
+	if err := c.healthChecker.UpdateConfig(newConfig); err != nil {
+		return fmt.Errorf("failed to update health checker config: %w", err)
 	}
 
-	return nil
-}
-
-// getHealthAwarePool tries to extract a HealthAwarePool from the locator
-func (c *Client) getHealthAwarePool() *HealthAwarePool {
-	if c.locator == nil {
-		return nil
-	}
-
-	// Check if the locator is a HealthAwarePool
-	if hap, ok := c.locator.(*HealthAwarePool); ok {
-		return hap
-	}
+	fmt.Printf("Successfully updated health checker config: enabled=%v, interval=%v, timeout=%v\n",
+		newConfig.Enabled, newConfig.Interval, newConfig.Timeout)
 
 	return nil
 }

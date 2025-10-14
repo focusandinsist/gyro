@@ -30,6 +30,15 @@ type HealthChecker interface {
 
 	// AddHealthListener adds a health status change listener.
 	AddHealthListener(listener HealthListener)
+
+	// UpdateConfig updates the health checker configuration dynamically.
+	UpdateConfig(newConfig HealthCheckerConfig) error
+
+	// GetConfig returns the current health checker configuration.
+	GetConfig() HealthCheckerConfig
+
+	// IsEnabled returns whether health checking is enabled.
+	IsEnabled() bool
 }
 
 type HealthCheckerConfig struct {
@@ -135,6 +144,24 @@ func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
 // GossipHealthCheckerAdapter adapts gossip.GossipHealthChecker to implement HealthChecker
 type GossipHealthCheckerAdapter struct {
 	*gossip.GossipHealthChecker
+	config HealthCheckerConfig // Store the original config for interface compliance
+}
+
+// UpdateConfig updates the health checker configuration dynamically
+func (g *GossipHealthCheckerAdapter) UpdateConfig(newConfig HealthCheckerConfig) error {
+	g.config = newConfig
+	// TODO: Update the underlying gossip health checker configuration
+	return nil
+}
+
+// GetConfig returns the current health checker configuration
+func (g *GossipHealthCheckerAdapter) GetConfig() HealthCheckerConfig {
+	return g.config
+}
+
+// IsEnabled returns whether health checking is enabled
+func (g *GossipHealthCheckerAdapter) IsEnabled() bool {
+	return g.config.Enabled
 }
 
 // AddHealthListener adapts the gossip health listener to the main package interface
@@ -197,7 +224,10 @@ func NewHealthChecker(config HealthCheckerConfig) (HealthChecker, error) {
 			return nil, err
 		}
 
-		return &GossipHealthCheckerAdapter{GossipHealthChecker: gossipChecker}, nil
+		return &GossipHealthCheckerAdapter{
+			GossipHealthChecker: gossipChecker,
+			config:              config,
+		}, nil
 	}
 
 	// Otherwise create default health checker
@@ -351,6 +381,13 @@ func (hc *DefaultHealthChecker) GetConfig() HealthCheckerConfig {
 	return hc.config
 }
 
+// IsEnabled returns whether health checking is enabled
+func (hc *DefaultHealthChecker) IsEnabled() bool {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	return hc.config.Enabled
+}
+
 // AddHealthListener adds a health status change listener.
 func (hc *DefaultHealthChecker) AddHealthListener(listener HealthListener) {
 	hc.mu.Lock()
@@ -460,19 +497,30 @@ type HealthEvent struct {
 	Timestamp time.Time
 }
 
+// HealthAwarePoolStats contains statistics about a health-aware pool
+type HealthAwarePoolStats struct {
+	TotalNodes     int `json:"total_nodes"`
+	HealthyNodes   int `json:"healthy_nodes"`
+	UnhealthyNodes int `json:"unhealthy_nodes"`
+}
+
 // HealthAwarePool wraps a Pool with health checking capabilities.
 type HealthAwarePool struct {
 	Locator
-	healthChecker   *DefaultHealthChecker
+	healthChecker   HealthChecker // Use interface instead of concrete type
 	healthyNodes    map[string]bool
 	healthEventChan chan HealthEvent
 	mu              sync.RWMutex
 }
 
-// NewHealthAwarePool creates a new health-aware locator.
+// NewHealthAwarePool creates a new health-aware locator with a default health checker.
 func NewHealthAwarePool(locator Locator, config HealthCheckerConfig) *HealthAwarePool {
 	healthChecker := NewDefaultHealthChecker(config)
+	return NewHealthAwarePoolWithChecker(locator, healthChecker)
+}
 
+// NewHealthAwarePoolWithChecker creates a new health-aware locator with an injected health checker.
+func NewHealthAwarePoolWithChecker(locator Locator, healthChecker HealthChecker) *HealthAwarePool {
 	hap := &HealthAwarePool{
 		Locator:         locator,
 		healthChecker:   healthChecker,
@@ -485,23 +533,7 @@ func NewHealthAwarePool(locator Locator, config HealthCheckerConfig) *HealthAwar
 		hap.healthyNodes[node.ID()] = true
 	}
 
-	// Add health listener to publish health events
-	healthChecker.AddHealthListener(func(nodeID string, healthy bool) {
-		event := HealthEvent{
-			NodeID:    nodeID,
-			Healthy:   healthy,
-			Timestamp: time.Now(),
-		}
-
-		// Non-blocking send to avoid deadlocks
-		select {
-		case hap.healthEventChan <- event:
-		default:
-			// Channel is full, drop the event
-			// TODO: add some log
-		}
-	})
-
+	// Note: Health listener will be added in StartHealthMonitoring to avoid duplication
 	return hap
 }
 
@@ -548,7 +580,7 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 
 // StartHealthMonitoring starts health monitoring for all nodes in the locator.
 func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
-	if !hap.healthChecker.config.Enabled {
+	if !hap.healthChecker.IsEnabled() {
 		return
 	}
 
@@ -558,13 +590,14 @@ func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 		hap.healthChecker.AddNode(node)
 	}
 
-	// Add health listener to update our internal state
+	// Add single health listener to update internal state and send events
 	hap.healthChecker.AddHealthListener(func(nodeID string, healthy bool) {
+		// Update internal state immediately
 		hap.mu.Lock()
 		hap.healthyNodes[nodeID] = healthy
 		hap.mu.Unlock()
 
-		// Send event to channel for further processing
+		// Send event to channel for advanced processing (alerts, metrics, etc.)
 		select {
 		case hap.healthEventChan <- HealthEvent{
 			NodeID:    nodeID,
@@ -573,6 +606,7 @@ func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 		}:
 		default:
 			// Channel is full, skip this event
+			// TODO: add some log
 		}
 	})
 
@@ -595,36 +629,22 @@ func (hap *HealthAwarePool) startHealthEventProcessor(ctx context.Context) {
 	}
 }
 
-// processHealthEvent processes a single health event
+// processHealthEvent processes a single health event for advanced features
 func (hap *HealthAwarePool) processHealthEvent(event HealthEvent) {
-	hap.mu.Lock()
-	defer hap.mu.Unlock()
-
-	oldStatus, existed := hap.healthyNodes[event.NodeID]
-	hap.healthyNodes[event.NodeID] = event.Healthy
-
 	// Log significant health changes (in production, use proper logging)
-	if !existed {
-		// New node discovered
-		if event.Healthy {
-			// fmt.Printf("New healthy node discovered: %s\n", event.NodeID)
-		} else {
-			// fmt.Printf("New unhealthy node discovered: %s\n", event.NodeID)
-		}
-	} else if oldStatus != event.Healthy {
-		// Health status changed
-		if event.Healthy {
-			// fmt.Printf("Node recovered: %s\n", event.NodeID)
-		} else {
-			// fmt.Printf("Node became unhealthy: %s\n", event.NodeID)
-		}
+	if event.Healthy {
+		// fmt.Printf("Node healthy: %s\n", event.NodeID)
+	} else {
+		// fmt.Printf("Node unhealthy: %s\n", event.NodeID)
 	}
 
-	// TODO
+	// TODO: Advanced health event processing
 	// 1. Temporarily adjust the node's weight in the consistent hash ring
 	// 2. Trigger rebalancing if too many nodes are unhealthy
 	// 3. Send alerts or notifications
 	// 4. Update metrics and monitoring systems
+	// 5. Implement circuit breaker logic
+	// 6. Trigger failover procedures
 }
 
 // AddNode adds a node to both the locator and health monitoring.
@@ -725,6 +745,29 @@ func (hap *HealthAwarePool) IsNodeHealthy(nodeID string) bool {
 
 	healthy, exists := hap.healthyNodes[nodeID]
 	return !exists || healthy // Default to healthy if unknown
+}
+
+// GetStats returns statistics about the health-aware pool including health status.
+func (hap *HealthAwarePool) GetStats() HealthAwarePoolStats {
+	hap.mu.RLock()
+	defer hap.mu.RUnlock()
+
+	stats := HealthAwarePoolStats{
+		TotalNodes:     len(hap.healthyNodes),
+		HealthyNodes:   0,
+		UnhealthyNodes: 0,
+	}
+
+	// Count healthy and unhealthy nodes from cached state (fast, no I/O)
+	for _, healthy := range hap.healthyNodes {
+		if healthy {
+			stats.HealthyNodes++
+		} else {
+			stats.UnhealthyNodes++
+		}
+	}
+
+	return stats
 }
 
 // Close closes the locator and stops health monitoring.

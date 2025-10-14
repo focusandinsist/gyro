@@ -242,31 +242,17 @@ func (cl *ConsistentLocator) Close() error {
 }
 
 // GetStats returns statistics about the locator.
+// Note: Health status is not included as it's the responsibility of HealthChecker/HealthAwarePool.
 func (cl *ConsistentLocator) GetStats() LocatorStats {
 	cl.mu.RLock()
 	defer cl.mu.RUnlock()
 
-	stats := LocatorStats{
-		TotalNodes:     len(cl.nodes),
-		HealthyNodes:   0,
-		UnhealthyNodes: 0,
+	return LocatorStats{
+		TotalNodes: len(cl.nodes),
 	}
-
-	ctx := context.Background()
-	for _, node := range cl.nodes {
-		if node.IsHealthy(ctx) {
-			stats.HealthyNodes++
-		} else {
-			stats.UnhealthyNodes++
-		}
-	}
-
-	return stats
 }
 
 // LocatorStats contains statistics about a locator.
 type LocatorStats struct {
-	TotalNodes     int `json:"total_nodes"`
-	HealthyNodes   int `json:"healthy_nodes"`
-	UnhealthyNodes int `json:"unhealthy_nodes"`
+	TotalNodes int `json:"total_nodes"`
 }
