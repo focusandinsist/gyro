@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // NodeInfo contains information about a service node.
@@ -137,6 +138,14 @@ func (ssd *StaticServiceDiscovery) SetNodes(serviceName string, nodes []NodeInfo
 	ssd.services[serviceName] = nodesCopy
 }
 
+// ClientHealth represents the health status of the client
+type ClientHealth struct {
+	ServiceDiscoveryHealthy   bool      `json:"service_discovery_healthy"`
+	LastServiceDiscoveryError string    `json:"last_service_discovery_error,omitempty"`
+	ServiceDiscoveryRetries   int       `json:"service_discovery_retries"`
+	LastHealthCheck           time.Time `json:"last_health_check"`
+}
+
 // Client provides configuration and service discovery.
 type Client struct {
 	mu            sync.RWMutex
@@ -147,6 +156,12 @@ type Client struct {
 	stopCh        chan struct{}
 	running       bool
 	nodeFactory   NodeFactory
+
+	// Health tracking
+	healthMu                  sync.RWMutex
+	serviceDiscoveryHealthy   bool
+	lastServiceDiscoveryError string
+	serviceDiscoveryRetries   int
 }
 
 // NodeFactory creates nodes from NodeInfo.
@@ -175,6 +190,9 @@ func NewClient(serviceName string, discovery ServiceDiscovery, configManager *Co
 		configManager: configManager,
 		nodeFactory:   nodeFactory,
 		stopCh:        make(chan struct{}),
+
+		// Initialize health status
+		serviceDiscoveryHealthy: false, // Will be set to true when watch is established
 	}
 
 	if err := client.initialize(); err != nil {
@@ -305,13 +323,55 @@ func (c *Client) Close() error {
 	return c.Stop()
 }
 
-// watchServiceNodes watches for service node changes.
-func (c *Client) watchServiceNodes(ctx context.Context) {
-	nodesCh, err := c.discovery.Watch(ctx, c.serviceName)
-	if err != nil {
-		fmt.Printf("Failed to watch service nodes: %v\n", err)
-		return
+// Health returns the current health status of the client
+func (c *Client) Health() *ClientHealth {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+
+	return &ClientHealth{
+		ServiceDiscoveryHealthy:   c.serviceDiscoveryHealthy,
+		LastServiceDiscoveryError: c.lastServiceDiscoveryError,
+		ServiceDiscoveryRetries:   c.serviceDiscoveryRetries,
+		LastHealthCheck:           time.Now(),
 	}
+}
+
+// IsHealthy returns true if the client is healthy
+func (c *Client) IsHealthy() bool {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+	return c.serviceDiscoveryHealthy
+}
+
+// updateServiceDiscoveryHealth updates the service discovery health status
+func (c *Client) updateServiceDiscoveryHealth(healthy bool, err error) {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	c.serviceDiscoveryHealthy = healthy
+	if err != nil {
+		c.lastServiceDiscoveryError = err.Error()
+		if !healthy {
+			c.serviceDiscoveryRetries++
+		}
+	} else {
+		c.lastServiceDiscoveryError = ""
+		if healthy {
+			c.serviceDiscoveryRetries = 0 // Reset retries on success
+		}
+	}
+}
+
+// watchServiceNodes watches for service node changes with retry mechanism.
+func (c *Client) watchServiceNodes(ctx context.Context) {
+	const (
+		maxRetries    = 10
+		baseDelay     = time.Second
+		maxDelay      = time.Minute
+		backoffFactor = 2.0
+	)
+
+	retryCount := 0
 
 	for {
 		select {
@@ -319,9 +379,71 @@ func (c *Client) watchServiceNodes(ctx context.Context) {
 			return
 		case <-c.stopCh:
 			return
+		default:
+		}
+
+		// Attempt to watch service nodes
+		nodesCh, err := c.discovery.Watch(ctx, c.serviceName)
+		if err != nil {
+			c.updateServiceDiscoveryHealth(false, err)
+			fmt.Printf("Failed to watch service nodes (attempt %d/%d): %v\n", retryCount+1, maxRetries, err)
+
+			retryCount++
+			if retryCount >= maxRetries {
+				fmt.Printf("Max retries reached for service discovery, giving up\n")
+				return
+			}
+
+			// Exponential backoff
+			multiplier := 1
+			for i := 0; i < retryCount; i++ {
+				multiplier *= 2
+			}
+			delay := time.Duration(int64(baseDelay) * int64(multiplier))
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.stopCh:
+				return
+			case <-time.After(delay):
+				continue
+			}
+		}
+
+		// Successfully established watch, reset retry count and mark healthy
+		retryCount = 0
+		c.updateServiceDiscoveryHealth(true, nil)
+		fmt.Printf("Successfully established service discovery watch\n")
+
+		// Process events from the watch channel
+		watchFailed := c.processServiceWatch(ctx, nodesCh)
+		if !watchFailed {
+			// Normal shutdown, don't retry
+			return
+		}
+
+		// Watch failed, will retry after backoff
+		c.updateServiceDiscoveryHealth(false, fmt.Errorf("service discovery watch channel closed unexpectedly"))
+		fmt.Printf("Service discovery watch failed, will retry...\n")
+	}
+}
+
+// processServiceWatch processes events from the service discovery watch channel
+// Returns true if the watch failed and should be retried, false for normal shutdown
+func (c *Client) processServiceWatch(ctx context.Context, nodesCh <-chan []NodeInfo) bool {
+	for {
+		select {
+		case <-ctx.Done():
+			return false // Normal shutdown
+		case <-c.stopCh:
+			return false // Normal shutdown
 		case nodes, ok := <-nodesCh:
 			if !ok {
-				return
+				return true // Channel closed, should retry
 			}
 			c.handleServiceNodesChange(nodes)
 		}
