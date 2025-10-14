@@ -150,6 +150,7 @@ type ClientHealth struct {
 type Client struct {
 	mu            sync.RWMutex
 	locator       Locator
+	healthChecker HealthChecker
 	serviceName   string
 	discovery     ServiceDiscovery
 	configManager *ConfigManager
@@ -169,8 +170,8 @@ type NodeFactory interface {
 	CreateNode(info NodeInfo) (Node, error)
 }
 
-// NewClient creates a new client.
-func NewClient(serviceName string, discovery ServiceDiscovery, configManager *ConfigManager, nodeFactory NodeFactory) (*Client, error) {
+// NewClient creates a new client with dependency injection.
+func NewClient(serviceName string, discovery ServiceDiscovery, configManager *ConfigManager, nodeFactory NodeFactory, healthChecker HealthChecker) (*Client, error) {
 	if serviceName == "" {
 		return nil, fmt.Errorf("service name cannot be empty")
 	}
@@ -183,12 +184,16 @@ func NewClient(serviceName string, discovery ServiceDiscovery, configManager *Co
 	if nodeFactory == nil {
 		return nil, fmt.Errorf("node factory cannot be nil")
 	}
+	if healthChecker == nil {
+		return nil, fmt.Errorf("health checker cannot be nil")
+	}
 
 	client := &Client{
 		serviceName:   serviceName,
 		discovery:     discovery,
 		configManager: configManager,
 		nodeFactory:   nodeFactory,
+		healthChecker: healthChecker,
 		stopCh:        make(chan struct{}),
 
 		// Initialize health status
@@ -212,27 +217,30 @@ func (c *Client) initializeUnsafe() error {
 		return fmt.Errorf("failed to discover initial nodes: %w", err)
 	}
 
-	// Create locator
+	// Create base locator
 	config := c.configManager.GetConfig()
-	locator, err := NewConsistentLocator(config.Locator)
+	baseLocator, err := NewConsistentLocator(config.Locator)
 	if err != nil {
 		return fmt.Errorf("failed to create locator: %w", err)
 	}
 
-	// Add nodes to locator
+	// Add nodes to base locator
 	for _, nodeInfo := range nodeInfos {
 		node, err := c.nodeFactory.CreateNode(nodeInfo)
 		if err != nil {
 			return fmt.Errorf("failed to create node %s: %w", nodeInfo.ID, err)
 		}
 
-		if err := locator.AddNode(node); err != nil {
+		if err := baseLocator.AddNode(node); err != nil {
 			return fmt.Errorf("failed to add node %s to locator: %w", nodeInfo.ID, err)
 		}
 	}
 
-	// Store the locator directly
-	c.locator = locator
+	// Wrap with HealthAwarePool using injected HealthChecker
+	healthAwarePool := NewHealthAwarePoolWithChecker(baseLocator, c.healthChecker)
+
+	// Store the health-aware locator
+	c.locator = healthAwarePool
 
 	return nil
 }
@@ -642,34 +650,13 @@ func (c *Client) connectionConfigEqual(old, new ConnectionConfig) bool {
 
 // updateHealthCheckerConfig updates the health checker configuration
 func (c *Client) updateHealthCheckerConfig(newConfig HealthCheckerConfig) error {
-	// Try to get the health checker from the client
-	healthAwarePool := c.getHealthAwarePool()
-	if healthAwarePool != nil {
-		// Update the health checker configuration
-		if err := healthAwarePool.UpdateHealthCheckerConfig(newConfig); err != nil {
-			return fmt.Errorf("failed to update health checker config: %w", err)
-		}
-		fmt.Printf("Successfully updated health checker config: enabled=%v, interval=%v, timeout=%v\n",
-			newConfig.Enabled, newConfig.Interval, newConfig.Timeout)
-	} else {
-		// No health-aware locator available, just log
-		fmt.Printf("No health-aware locator available, config update logged: enabled=%v, interval=%v, timeout=%v\n",
-			newConfig.Enabled, newConfig.Interval, newConfig.Timeout)
+	// Directly update the injected health checker
+	if err := c.healthChecker.UpdateConfig(newConfig); err != nil {
+		return fmt.Errorf("failed to update health checker config: %w", err)
 	}
 
-	return nil
-}
-
-// getHealthAwarePool tries to extract a HealthAwarePool from the locator
-func (c *Client) getHealthAwarePool() *HealthAwarePool {
-	if c.locator == nil {
-		return nil
-	}
-
-	// Check if the locator is a HealthAwarePool
-	if hap, ok := c.locator.(*HealthAwarePool); ok {
-		return hap
-	}
+	fmt.Printf("Successfully updated health checker config: enabled=%v, interval=%v, timeout=%v\n",
+		newConfig.Enabled, newConfig.Interval, newConfig.Timeout)
 
 	return nil
 }

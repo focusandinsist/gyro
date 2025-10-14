@@ -30,6 +30,15 @@ type HealthChecker interface {
 
 	// AddHealthListener adds a health status change listener.
 	AddHealthListener(listener HealthListener)
+
+	// UpdateConfig updates the health checker configuration dynamically.
+	UpdateConfig(newConfig HealthCheckerConfig) error
+
+	// GetConfig returns the current health checker configuration.
+	GetConfig() HealthCheckerConfig
+
+	// IsEnabled returns whether health checking is enabled.
+	IsEnabled() bool
 }
 
 type HealthCheckerConfig struct {
@@ -135,6 +144,24 @@ func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
 // GossipHealthCheckerAdapter adapts gossip.GossipHealthChecker to implement HealthChecker
 type GossipHealthCheckerAdapter struct {
 	*gossip.GossipHealthChecker
+	config HealthCheckerConfig // Store the original config for interface compliance
+}
+
+// UpdateConfig updates the health checker configuration dynamically
+func (g *GossipHealthCheckerAdapter) UpdateConfig(newConfig HealthCheckerConfig) error {
+	g.config = newConfig
+	// TODO: Update the underlying gossip health checker configuration
+	return nil
+}
+
+// GetConfig returns the current health checker configuration
+func (g *GossipHealthCheckerAdapter) GetConfig() HealthCheckerConfig {
+	return g.config
+}
+
+// IsEnabled returns whether health checking is enabled
+func (g *GossipHealthCheckerAdapter) IsEnabled() bool {
+	return g.config.Enabled
 }
 
 // AddHealthListener adapts the gossip health listener to the main package interface
@@ -197,7 +224,10 @@ func NewHealthChecker(config HealthCheckerConfig) (HealthChecker, error) {
 			return nil, err
 		}
 
-		return &GossipHealthCheckerAdapter{GossipHealthChecker: gossipChecker}, nil
+		return &GossipHealthCheckerAdapter{
+			GossipHealthChecker: gossipChecker,
+			config:              config,
+		}, nil
 	}
 
 	// Otherwise create default health checker
@@ -351,6 +381,13 @@ func (hc *DefaultHealthChecker) GetConfig() HealthCheckerConfig {
 	return hc.config
 }
 
+// IsEnabled returns whether health checking is enabled
+func (hc *DefaultHealthChecker) IsEnabled() bool {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	return hc.config.Enabled
+}
+
 // AddHealthListener adds a health status change listener.
 func (hc *DefaultHealthChecker) AddHealthListener(listener HealthListener) {
 	hc.mu.Lock()
@@ -470,16 +507,20 @@ type HealthAwarePoolStats struct {
 // HealthAwarePool wraps a Pool with health checking capabilities.
 type HealthAwarePool struct {
 	Locator
-	healthChecker   *DefaultHealthChecker
+	healthChecker   HealthChecker // Use interface instead of concrete type
 	healthyNodes    map[string]bool
 	healthEventChan chan HealthEvent
 	mu              sync.RWMutex
 }
 
-// NewHealthAwarePool creates a new health-aware locator.
+// NewHealthAwarePool creates a new health-aware locator with a default health checker.
 func NewHealthAwarePool(locator Locator, config HealthCheckerConfig) *HealthAwarePool {
 	healthChecker := NewDefaultHealthChecker(config)
+	return NewHealthAwarePoolWithChecker(locator, healthChecker)
+}
 
+// NewHealthAwarePoolWithChecker creates a new health-aware locator with an injected health checker.
+func NewHealthAwarePoolWithChecker(locator Locator, healthChecker HealthChecker) *HealthAwarePool {
 	hap := &HealthAwarePool{
 		Locator:         locator,
 		healthChecker:   healthChecker,
@@ -539,7 +580,7 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 
 // StartHealthMonitoring starts health monitoring for all nodes in the locator.
 func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
-	if !hap.healthChecker.config.Enabled {
+	if !hap.healthChecker.IsEnabled() {
 		return
 	}
 
