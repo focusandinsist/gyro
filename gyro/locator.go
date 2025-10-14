@@ -78,6 +78,8 @@ func NewConsistentLocator(config LocatorConfig) (*ConsistentLocator, error) {
 }
 
 // Get retrieves a node for the given key using consistent hashing.
+// Note: This method only performs location, not health checking.
+// Health checking should be handled by HealthAwarePool.
 func (cl *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) {
 	cl.mu.RLock()
 	defer cl.mu.RUnlock()
@@ -100,22 +102,8 @@ func (cl *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) 
 		return nil, fmt.Errorf("node %s not found in ring", nodeID)
 	}
 
-	// Check if node is healthy
-	if !node.IsHealthy(ctx) {
-		// Try to find a replica
-		replicas, err := cl.GetReplicas(ctx, key, 2)
-		if err != nil || len(replicas) < 2 {
-			return nil, fmt.Errorf("primary node %s is unhealthy and no healthy replicas found", nodeID)
-		}
-		// Return the first healthy replica (excluding the primary)
-		for _, replica := range replicas[1:] {
-			if replica.IsHealthy(ctx) {
-				return replica, nil
-			}
-		}
-		return nil, fmt.Errorf("no healthy nodes found for key: %s", key)
-	}
-
+	// Return the node directly without health checking
+	// Health checking is the responsibility of HealthAwarePool
 	return node, nil
 }
 
@@ -185,28 +173,39 @@ func (cl *ConsistentLocator) RemoveNode(nodeID string) error {
 		return fmt.Errorf("node ID cannot be empty")
 	}
 
-	cl.mu.Lock()
-	defer cl.mu.Unlock()
+	// Acquire lock and remove from data structures
+	var nodeToClose Node
+	func() {
+		cl.mu.Lock()
+		defer cl.mu.Unlock()
 
-	// Check if node exists
-	node, exists := cl.nodes[nodeID]
-	if !exists {
+		// Check if node exists
+		node, exists := cl.nodes[nodeID]
+		if !exists {
+			return // Will be handled after the closure
+		}
+
+		// Remove node from consistent hash ring
+		if err := cl.ring.Remove(context.Background(), nodeID); err != nil {
+			// Log error but continue with cleanup
+			fmt.Printf("Warning: failed to remove node %s from consistent hash ring: %v\n", nodeID, err)
+		}
+
+		// Remove node from local map and save reference for closing
+		delete(cl.nodes, nodeID)
+		nodeToClose = node
+	}()
+
+	// Check if node was found
+	if nodeToClose == nil {
 		return fmt.Errorf("node %s not found in locator", nodeID)
 	}
 
-	// Remove node from consistent hash ring
-	if err := cl.ring.Remove(context.Background(), nodeID); err != nil {
-		return fmt.Errorf("failed to remove node %s from consistent hash ring: %w", nodeID, err)
-	}
-
-	// Close the node connection
-	if err := node.Close(); err != nil {
+	// Close the node connection outside of the lock
+	if err := nodeToClose.Close(); err != nil {
 		// TODO: use a proper logger
 		fmt.Printf("Warning: failed to close node %s: %v\n", nodeID, err)
 	}
-
-	// Remove node from local map
-	delete(cl.nodes, nodeID)
 
 	return nil
 }

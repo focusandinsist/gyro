@@ -1,9 +1,11 @@
-package gyro
+package grpc
 
 import (
 	"context"
 	"fmt"
 	"sync"
+
+	"gyro/gyro"
 )
 
 type GRPCConnection interface {
@@ -77,19 +79,19 @@ func (gn *GRPCNode) GetNativeClient() interface{} {
 }
 
 type GRPCClientConfig struct {
-	Locator    LocatorConfig    `json:"locator"`
-	Connection ConnectionConfig `json:"connection"`
+	Locator    gyro.LocatorConfig    `json:"locator"`
+	Connection gyro.ConnectionConfig `json:"connection"`
 }
 
 func DefaultGRPCClientConfig() *GRPCClientConfig {
 	return &GRPCClientConfig{
-		Locator:    DefaultLocatorConfig(),
-		Connection: DefaultConnectionConfig(),
+		Locator:    gyro.DefaultLocatorConfig(),
+		Connection: gyro.DefaultConnectionConfig(),
 	}
 }
 
 type GRPCClient struct {
-	locator Locator
+	locator gyro.Locator
 	config  *GRPCClientConfig
 }
 
@@ -99,27 +101,14 @@ func NewGRPCClient(addresses []string, config *GRPCClientConfig) (*GRPCClient, e
 	}
 
 	// Create the connection locator
-	locator, err := NewConsistentLocator(config.Locator)
+	locator, err := gyro.NewConsistentLocator(config.Locator)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection locator: %w", err)
 	}
 
 	// Create gRPC nodes and add them to the locator
-	for i, address := range addresses {
-		nodeID := fmt.Sprintf("grpc-%d", i)
-
-		conn := &MockGRPCConnection{
-			address:   address,
-			connected: true,
-			state:     "READY",
-		}
-
-		node := NewGRPCNode(nodeID, address, conn)
-		if err := locator.AddNode(node); err != nil {
-			locator.Close()
-			return nil, fmt.Errorf("failed to add gRPC node %s: %w", nodeID, err)
-		}
-	}
+	// Note: This requires real gRPC connection implementation
+	return nil, fmt.Errorf("gRPC client requires real gRPC connection implementation")
 
 	return &GRPCClient{
 		locator: locator,
@@ -194,44 +183,6 @@ func (gc *GRPCClient) GetAllClients() map[string]interface{} {
 // Close closes all connections and releases resources.
 func (gc *GRPCClient) Close() error {
 	return gc.locator.Close()
-}
-
-type MockGRPCConnection struct {
-	address   string
-	connected bool
-	state     string
-	mu        sync.RWMutex
-}
-
-func (mgc *MockGRPCConnection) GetNativeClient() interface{} {
-	mgc.mu.RLock()
-	defer mgc.mu.RUnlock()
-	// In real implementation, this would return *grpc.ClientConn
-	return mgc
-}
-
-// Close closes the connection.
-func (mgc *MockGRPCConnection) Close() error {
-	mgc.mu.Lock()
-	defer mgc.mu.Unlock()
-
-	mgc.connected = false
-	mgc.state = "SHUTDOWN"
-	return nil
-}
-
-// IsConnected returns true if the connection is established.
-func (mgc *MockGRPCConnection) IsConnected() bool {
-	mgc.mu.RLock()
-	defer mgc.mu.RUnlock()
-	return mgc.connected
-}
-
-// GetState returns the current connection state.
-func (mgc *MockGRPCConnection) GetState() string {
-	mgc.mu.RLock()
-	defer mgc.mu.RUnlock()
-	return mgc.state
 }
 
 func NewGRPCCluster(addresses []string) (*GRPCClient, error) {

@@ -1,10 +1,11 @@
-package gyro
+package redis
 
 import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
+
+	"gyro/gyro"
 )
 
 // RedisConnection a Redis connection interface.
@@ -79,53 +80,26 @@ func (rn *RedisNode) GetNativeClient() interface{} {
 }
 
 type RedisClientConfig struct {
-	Locator    LocatorConfig    `json:"locator"`
-	Connection ConnectionConfig `json:"connection"`
+	Locator    gyro.LocatorConfig    `json:"locator"`
+	Connection gyro.ConnectionConfig `json:"connection"`
 }
 
 func DefaultRedisClientConfig() *RedisClientConfig {
 	return &RedisClientConfig{
-		Locator:    DefaultLocatorConfig(),
-		Connection: DefaultConnectionConfig(),
+		Locator:    gyro.DefaultLocatorConfig(),
+		Connection: gyro.DefaultConnectionConfig(),
 	}
 }
 
 // RedisClient routes requests to Redis cluster nodes.
 type RedisClient struct {
-	locator Locator
+	locator gyro.Locator
 	config  *RedisClientConfig
 }
 
 func NewRedisClient(addresses []string, config *RedisClientConfig) (*RedisClient, error) {
-	if config == nil {
-		config = DefaultRedisClientConfig()
-	}
-
-	locator, err := NewConsistentLocator(config.Locator)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create connection locator: %w", err)
-	}
-
-	for i, address := range addresses {
-		nodeID := fmt.Sprintf("redis-%d", i)
-
-		conn := &MockRedisConnection{
-			address:      address,
-			connected:    true,
-			nativeClient: &MockNativeRedisClient{address: address, data: make(map[string]string)},
-		}
-
-		node := NewRedisNode(nodeID, address, conn)
-		if err := locator.AddNode(node); err != nil {
-			locator.Close()
-			return nil, fmt.Errorf("failed to add Redis node %s: %w", nodeID, err)
-		}
-	}
-
-	return &RedisClient{
-		locator: locator,
-		config:  config,
-	}, nil
+	// Redis client requires real Redis connection implementation
+	return nil, fmt.Errorf("Redis client requires real Redis connection implementation")
 }
 
 func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (interface{}, error) {
@@ -191,82 +165,6 @@ func (rc *RedisClient) GetAllClients() map[string]interface{} {
 // Close closes all connections and releases resources.
 func (rc *RedisClient) Close() error {
 	return rc.locator.Close()
-}
-
-type MockNativeRedisClient struct {
-	address string
-	data    map[string]string
-	mu      sync.RWMutex
-}
-
-func (mnrc *MockNativeRedisClient) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
-	mnrc.mu.Lock()
-	defer mnrc.mu.Unlock()
-
-	if mnrc.data == nil {
-		mnrc.data = make(map[string]string)
-	}
-
-	mnrc.data[key] = fmt.Sprintf("%v", value)
-	return nil
-}
-
-func (mnrc *MockNativeRedisClient) Get(ctx context.Context, key string) (string, error) {
-	mnrc.mu.RLock()
-	defer mnrc.mu.RUnlock()
-
-	value, exists := mnrc.data[key]
-	if !exists {
-		return "", fmt.Errorf("redis: nil")
-	}
-	return value, nil
-}
-
-func (mnrc *MockNativeRedisClient) Del(ctx context.Context, keys ...string) (int64, error) {
-	mnrc.mu.Lock()
-	defer mnrc.mu.Unlock()
-
-	count := int64(0)
-	for _, key := range keys {
-		if _, exists := mnrc.data[key]; exists {
-			delete(mnrc.data, key)
-			count++
-		}
-	}
-	return count, nil
-}
-
-func (mnrc *MockNativeRedisClient) Ping(ctx context.Context) error {
-	return nil
-}
-
-type MockRedisConnection struct {
-	address      string
-	connected    bool
-	nativeClient *MockNativeRedisClient
-	mu           sync.RWMutex
-}
-
-func (mrc *MockRedisConnection) GetNativeClient() interface{} {
-	mrc.mu.RLock()
-	defer mrc.mu.RUnlock()
-	return mrc.nativeClient
-}
-
-func (mrc *MockRedisConnection) Ping(ctx context.Context) error {
-	if !mrc.connected {
-		return fmt.Errorf("connection is not established")
-	}
-	return nil
-}
-
-func (mrc *MockRedisConnection) Close() error {
-	mrc.connected = false
-	return nil
-}
-
-func (mrc *MockRedisConnection) IsConnected() bool {
-	return mrc.connected
 }
 
 func NewRedisCluster(addresses []string) (*RedisClient, error) {
