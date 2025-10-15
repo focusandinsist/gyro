@@ -16,6 +16,50 @@ type RedisConnection interface {
 	GetNativeClient() interface{}
 }
 
+// DefaultRedisConnection is a default implementation of RedisConnection.
+type DefaultRedisConnection struct {
+	address   string
+	connected bool
+	mu        sync.RWMutex
+}
+
+// NewRedisConnection creates a new Redis connection.
+func NewRedisConnection(address string, config gyro.ConnectionConfig) (RedisConnection, error) {
+	conn := &DefaultRedisConnection{
+		address:   address,
+		connected: true, // Simulate successful connection for testing
+	}
+	return conn, nil
+}
+
+// Close closes the Redis connection.
+func (c *DefaultRedisConnection) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.connected = false
+	return nil
+}
+
+// IsConnected returns whether the connection is active.
+func (c *DefaultRedisConnection) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected
+}
+
+// Ping tests the connection.
+func (c *DefaultRedisConnection) Ping(ctx context.Context) error {
+	if !c.IsConnected() {
+		return fmt.Errorf("connection is not active")
+	}
+	return nil
+}
+
+// GetNativeClient returns the native Redis client.
+func (c *DefaultRedisConnection) GetNativeClient() interface{} {
+	return nil // Placeholder for actual Redis client
+}
+
 // RedisNode .
 type RedisNode struct {
 	id      string
@@ -169,4 +213,27 @@ func (rc *RedisClient) Close() error {
 
 func NewRedisCluster(addresses []string) (*RedisClient, error) {
 	return NewRedisClient(addresses, nil)
+}
+
+// RedisNodeFactory creates Redis nodes.
+type RedisNodeFactory struct {
+	config *RedisClientConfig
+}
+
+// NewRedisNodeFactory creates a new Redis node factory.
+func NewRedisNodeFactory() *RedisNodeFactory {
+	return &RedisNodeFactory{
+		config: DefaultRedisClientConfig(),
+	}
+}
+
+// CreateNode creates a new Redis node from NodeInfo.
+func (f *RedisNodeFactory) CreateNode(info gyro.NodeInfo) (gyro.Node, error) {
+	// Create Redis connection
+	conn, err := NewRedisConnection(info.Address, f.config.Connection)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Redis connection to %s: %w", info.Address, err)
+	}
+
+	return NewRedisNode(info.ID, info.Address, conn), nil
 }

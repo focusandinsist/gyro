@@ -528,9 +528,13 @@ func NewHealthAwarePoolWithChecker(locator Locator, healthChecker HealthChecker)
 		healthEventChan: make(chan HealthEvent, 100), // Buffered channel for health events
 	}
 
-	// Initialize all nodes as healthy
+	// Initialize all nodes as healthy and add them to health checker
 	for _, node := range locator.GetAllNodes() {
 		hap.healthyNodes[node.ID()] = true
+		// Add node to health checker for monitoring
+		if healthChecker != nil {
+			healthChecker.AddNode(node)
+		}
 	}
 
 	// Note: Health listener will be added in StartHealthMonitoring to avoid duplication
