@@ -50,12 +50,8 @@ type ConsistentLocator struct {
 func NewConsistentLocator(config LocatorConfig) (*ConsistentLocator, error) {
 	var hasher consistent.Hasher
 	switch config.HashFunction {
-	case "fnv":
-		hasher = consistent.NewFNVHasher()
-	case "crc64":
-		fallthrough
 	default:
-		hasher = consistent.NewCRC64Hasher()
+		hasher = consistent.NewDefaultHasher()
 	}
 
 	consistentConfig := consistent.Config{
