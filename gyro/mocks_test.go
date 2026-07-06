@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// MockNode is a test implementation of Node interface that allows full control over health status
+// MockNode .
 type MockNode struct {
 	id      string
 	address string

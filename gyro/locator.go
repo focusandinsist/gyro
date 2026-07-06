@@ -3,7 +3,9 @@ package gyro
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/focusandinsist/consistent-go/consistent"
 )
@@ -36,7 +38,7 @@ func DefaultLocatorConfig() LocatorConfig {
 		PartitionCount:    271,
 		ReplicationFactor: 20,
 		Load:              1.25,
-		HashFunction:      "crc64",
+		HashFunction:      "xxhash",
 	}
 }
 
@@ -45,13 +47,18 @@ type ConsistentLocator struct {
 	nodes  map[string]Node
 	ring   *consistent.Consistent
 	config LocatorConfig
+	logger atomic.Pointer[slog.Logger]
 }
 
 func NewConsistentLocator(config LocatorConfig) (*ConsistentLocator, error) {
 	var hasher consistent.Hasher
 	switch config.HashFunction {
+	case "", "xxhash":
+		hasher = consistent.NewXXHasher()
+	case "murmur3":
+		hasher = consistent.NewMurmurHash3Hasher()
 	default:
-		hasher = consistent.NewDefaultHasher()
+		return nil, fmt.Errorf("unknown hash function: %s", config.HashFunction)
 	}
 
 	consistentConfig := consistent.Config{
@@ -66,16 +73,32 @@ func NewConsistentLocator(config LocatorConfig) (*ConsistentLocator, error) {
 		return nil, fmt.Errorf("failed to create consistent hash ring: %w", err)
 	}
 
-	return &ConsistentLocator{
+	cl := &ConsistentLocator{
 		nodes:  make(map[string]Node),
 		ring:   ring,
 		config: config,
-	}, nil
+	}
+	cl.logger.Store(discardLogger)
+
+	return cl, nil
+}
+
+// SetLogger overrides the logger used for internal diagnostics. Passing nil
+// restores the default no-op logger.
+func (cl *ConsistentLocator) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = discardLogger
+	}
+	cl.logger.Store(logger)
+}
+
+func (cl *ConsistentLocator) log() *slog.Logger {
+	return cl.logger.Load()
 }
 
 // Get retrieves a node for the given key using consistent hashing.
-// Note: This method only performs location, not health checking.
-// Health checking should be handled by HealthAwarePool.
+// Note: this only performs location, not health checking - that's
+// HealthAwarePool's responsibility.
 func (cl *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) {
 	cl.mu.RLock()
 	defer cl.mu.RUnlock()
@@ -84,7 +107,6 @@ func (cl *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) 
 		return nil, fmt.Errorf("no nodes available in ring")
 	}
 
-	// Use consistent hashing to find the node
 	nodeID, err := cl.ring.LocateKey(ctx, []byte(key))
 	if err != nil {
 		return nil, err
@@ -98,8 +120,6 @@ func (cl *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) 
 		return nil, fmt.Errorf("node %s not found in ring", nodeID)
 	}
 
-	// Return the node directly without health checking
-	// Health checking is the responsibility of HealthAwarePool
 	return node, nil
 }
 
@@ -116,13 +136,11 @@ func (cl *ConsistentLocator) GetReplicas(ctx context.Context, key string, count 
 		return []Node{}, nil
 	}
 
-	// Get replica node IDs from consistent hash ring
 	nodeIDs, err := cl.ring.LocateReplicas(ctx, []byte(key), count)
 	if err != nil {
 		return nil, fmt.Errorf("failed to locate replicas for key %s: %w", key, err)
 	}
 
-	// Convert node IDs to Node objects
 	replicas := make([]Node, 0, len(nodeIDs))
 	for _, nodeID := range nodeIDs {
 		if node, exists := cl.nodes[nodeID]; exists {
@@ -147,17 +165,14 @@ func (cl *ConsistentLocator) AddNode(node Node) error {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 
-	// Check if node already exists
 	if _, exists := cl.nodes[nodeID]; exists {
 		return fmt.Errorf("node %s already exists in locator", nodeID)
 	}
 
-	// Add node to consistent hash ring
 	if err := cl.ring.Add(context.Background(), nodeID); err != nil {
 		return fmt.Errorf("failed to add node %s to consistent hash ring: %w", nodeID, err)
 	}
 
-	// Add node to local map
 	cl.nodes[nodeID] = node
 
 	return nil
@@ -169,38 +184,31 @@ func (cl *ConsistentLocator) RemoveNode(nodeID string) error {
 		return fmt.Errorf("node ID cannot be empty")
 	}
 
-	// Acquire lock and remove from data structures
 	var nodeToClose Node
 	func() {
 		cl.mu.Lock()
 		defer cl.mu.Unlock()
 
-		// Check if node exists
 		node, exists := cl.nodes[nodeID]
 		if !exists {
-			return // Will be handled after the closure
+			return
 		}
 
-		// Remove node from consistent hash ring
 		if err := cl.ring.Remove(context.Background(), nodeID); err != nil {
-			// Log error but continue with cleanup
-			fmt.Printf("Warning: failed to remove node %s from consistent hash ring: %v\n", nodeID, err)
+			cl.log().Warn("failed to remove node from consistent hash ring", "node_id", nodeID, "error", err)
 		}
 
-		// Remove node from local map and save reference for closing
 		delete(cl.nodes, nodeID)
 		nodeToClose = node
 	}()
 
-	// Check if node was found
 	if nodeToClose == nil {
 		return fmt.Errorf("node %s not found in locator", nodeID)
 	}
 
-	// Close the node connection outside of the lock
+	// Close outside the lock so a slow Close() doesn't block other locator operations.
 	if err := nodeToClose.Close(); err != nil {
-		// TODO: use a proper logger
-		fmt.Printf("Warning: failed to close node %s: %v\n", nodeID, err)
+		cl.log().Warn("failed to close node", "node_id", nodeID, "error", err)
 	}
 
 	return nil
@@ -231,14 +239,13 @@ func (cl *ConsistentLocator) Close() error {
 		}
 	}
 
-	// Clear all nodes
 	cl.nodes = make(map[string]Node)
 
 	return lastErr
 }
 
 // GetStats returns statistics about the locator.
-// Note: Health status is not included as it's the responsibility of HealthChecker/HealthAwarePool.
+// Note: health status is not included - that's HealthChecker/HealthAwarePool's responsibility.
 func (cl *ConsistentLocator) GetStats() LocatorStats {
 	cl.mu.RLock()
 	defer cl.mu.RUnlock()

@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
+
+	goredis "github.com/redis/go-redis/v9"
 
 	"gyro/gyro"
 )
@@ -13,54 +16,67 @@ type RedisConnection interface {
 	Ping(ctx context.Context) error
 	Close() error
 	IsConnected() bool
-	GetNativeClient() interface{}
+	GetNativeClient() any
 }
 
-// DefaultRedisConnection is a default implementation of RedisConnection.
+// DefaultRedisConnection wraps a real go-redis client.
 type DefaultRedisConnection struct {
 	address   string
-	connected bool
-	mu        sync.RWMutex
+	client    *goredis.Client
+	connected atomic.Bool
 }
 
 // NewRedisConnection creates a new Redis connection.
 func NewRedisConnection(address string, config gyro.ConnectionConfig) (RedisConnection, error) {
+	client := goredis.NewClient(&goredis.Options{
+		Addr:            address,
+		Protocol:        2, // for broader compatibility
+		DialTimeout:     config.ConnectTimeout,
+		ReadTimeout:     config.ReadTimeout,
+		WriteTimeout:    config.WriteTimeout,
+		PoolSize:        config.MaxActiveConns,
+		MinIdleConns:    config.MaxIdleConns,
+		ConnMaxIdleTime: config.IdleTimeout,
+	})
+
 	conn := &DefaultRedisConnection{
-		address:   address,
-		connected: true, // Simulate successful connection for testing
+		address: address,
+		client:  client,
 	}
+	conn.connected.Store(true) // optimistic; Ping() will correct this
+
 	return conn, nil
 }
 
 // Close closes the Redis connection.
 func (c *DefaultRedisConnection) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.connected = false
-	return nil
+	c.connected.Store(false)
+	return c.client.Close()
 }
 
-// IsConnected returns whether the connection is active.
+// IsConnected returns the last known connectivity state (cheap, no I/O).
+// Call Ping to actually verify and refresh this state.
 func (c *DefaultRedisConnection) IsConnected() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.connected
+	return c.connected.Load()
 }
 
-// Ping tests the connection.
+// Ping tests the connection against the real Redis server.
 func (c *DefaultRedisConnection) Ping(ctx context.Context) error {
-	if !c.IsConnected() {
-		return fmt.Errorf("connection is not active")
+	if err := c.client.Ping(ctx).Err(); err != nil {
+		c.connected.Store(false)
+		return fmt.Errorf("redis ping to %s failed: %w", c.address, err)
 	}
+	c.connected.Store(true)
 	return nil
 }
 
-// GetNativeClient returns the native Redis client.
-func (c *DefaultRedisConnection) GetNativeClient() interface{} {
-	return nil // Placeholder for actual Redis client
+// GetNativeClient returns the underlying *redis.Client for direct use with
+// the full go-redis API.
+func (c *DefaultRedisConnection) GetNativeClient() any {
+	return c.client
 }
 
-// RedisNode .
+// RedisNode adapts a Redis connection to the gyro.Node interface.
 type RedisNode struct {
 	id      string
 	address string
@@ -87,13 +103,6 @@ func (rn *RedisNode) Address() string {
 }
 
 func (rn *RedisNode) IsHealthy(ctx context.Context) bool {
-	rn.mu.RLock()
-	if !rn.healthy || !rn.conn.IsConnected() {
-		rn.mu.RUnlock()
-		return false
-	}
-	rn.mu.RUnlock()
-
 	if err := rn.conn.Ping(ctx); err != nil {
 		rn.mu.Lock()
 		rn.healthy = false
@@ -101,6 +110,9 @@ func (rn *RedisNode) IsHealthy(ctx context.Context) bool {
 		return false
 	}
 
+	rn.mu.Lock()
+	rn.healthy = true
+	rn.mu.Unlock()
 	return true
 }
 
@@ -112,7 +124,7 @@ func (rn *RedisNode) Close() error {
 	return rn.conn.Close()
 }
 
-func (rn *RedisNode) GetNativeClient() interface{} {
+func (rn *RedisNode) GetNativeClient() any {
 	rn.mu.RLock()
 	defer rn.mu.RUnlock()
 
@@ -141,12 +153,40 @@ type RedisClient struct {
 	config  *RedisClientConfig
 }
 
+// NewRedisClient creates a client-side sharded Redis cluster client. Each
+// address gets its own go-redis connection; routing between them is done
+// via consistent hashing.
 func NewRedisClient(addresses []string, config *RedisClientConfig) (*RedisClient, error) {
-	// Redis client requires real Redis connection implementation
-	return nil, fmt.Errorf("Redis client requires real Redis connection implementation")
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("at least one Redis address is required")
+	}
+	if config == nil {
+		config = DefaultRedisClientConfig()
+	}
+
+	locator, err := gyro.NewConsistentLocator(config.Locator)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection locator: %w", err)
+	}
+
+	factory := &RedisNodeFactory{config: config}
+	for i, addr := range addresses {
+		node, err := factory.CreateNode(gyro.NodeInfo{
+			ID:      fmt.Sprintf("redis-%d", i+1),
+			Address: addr,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create node for %s: %w", addr, err)
+		}
+		if err := locator.AddNode(node); err != nil {
+			return nil, fmt.Errorf("failed to add node for %s: %w", addr, err)
+		}
+	}
+
+	return &RedisClient{locator: locator, config: config}, nil
 }
 
-func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (interface{}, error) {
+func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (any, error) {
 	node, err := rc.locator.Get(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node for key '%s': %w", key, err)
@@ -165,13 +205,13 @@ func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (interfa
 	return nativeClient, nil
 }
 
-func (rc *RedisClient) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]interface{}, error) {
+func (rc *RedisClient) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]any, error) {
 	nodes, err := rc.locator.GetReplicas(ctx, key, replicaCount)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get replicas for key '%s': %w", key, err)
 	}
 
-	clients := make([]interface{}, 0, len(nodes))
+	clients := make([]any, 0, len(nodes))
 	for _, node := range nodes {
 		redisNode, ok := node.(*RedisNode)
 		if !ok {
@@ -187,9 +227,9 @@ func (rc *RedisClient) GetClientsForReplicas(ctx context.Context, key string, re
 	return clients, nil
 }
 
-func (rc *RedisClient) GetAllClients() map[string]interface{} {
+func (rc *RedisClient) GetAllClients() map[string]any {
 	nodes := rc.locator.GetAllNodes()
-	clients := make(map[string]interface{})
+	clients := make(map[string]any)
 
 	for _, node := range nodes {
 		redisNode, ok := node.(*RedisNode)
@@ -229,7 +269,6 @@ func NewRedisNodeFactory() *RedisNodeFactory {
 
 // CreateNode creates a new Redis node from NodeInfo.
 func (f *RedisNodeFactory) CreateNode(info gyro.NodeInfo) (gyro.Node, error) {
-	// Create Redis connection
 	conn, err := NewRedisConnection(info.Address, f.config.Connection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Redis connection to %s: %w", info.Address, err)
