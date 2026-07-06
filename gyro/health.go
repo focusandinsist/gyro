@@ -6,8 +6,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"gyro/gyro/health/gossip"
 )
 
 // HealthChecker provides health checking capabilities for nodes.
@@ -30,9 +28,6 @@ type HealthCheckerConfig struct {
 	Timeout           time.Duration `json:"timeout"`
 	FailureThreshold  int           `json:"failure_threshold"`
 	RecoveryThreshold int           `json:"recovery_threshold"`
-
-	// Gossip is optional; nil/disabled means active polling is used instead.
-	Gossip *GossipConfig `json:"gossip,omitempty"`
 }
 
 func DefaultHealthCheckerConfig() HealthCheckerConfig {
@@ -69,48 +64,6 @@ type NodeHealthStats struct {
 
 type HealthListener func(nodeID string, healthy bool)
 
-// GossipConfig configures the Gossip health checker
-type GossipConfig struct {
-	Enabled        bool                `json:"enabled"`
-	ProbingRatio   float64             `json:"probing_ratio"` // fraction of nodes each client probes, e.g. 0.1 = 10%
-	GossipInterval time.Duration       `json:"gossip_interval"`
-	PeerDiscovery  PeerDiscoveryConfig `json:"peer_discovery"`
-	Transport      TransportConfig     `json:"transport"`
-	MaxPeers       int                 `json:"max_peers"`
-	MessageTTL     time.Duration       `json:"message_ttl"`
-}
-
-// PeerDiscoveryConfig configures peer discovery
-type PeerDiscoveryConfig struct {
-	Type   string         `json:"type"` // "static", "consul", "kubernetes"
-	Config map[string]any `json:"config"`
-}
-
-// TransportConfig configures the transport layer
-type TransportConfig struct {
-	Type     string         `json:"type"` // "udp", "http"
-	BindAddr string         `json:"bind_addr"`
-	Config   map[string]any `json:"config"`
-}
-
-// DefaultGossipConfig returns the default Gossip configuration
-func DefaultGossipConfig() *GossipConfig {
-	return &GossipConfig{
-		Enabled:        false,
-		ProbingRatio:   0.1,
-		GossipInterval: 5 * time.Second,
-		MaxPeers:       10,
-		MessageTTL:     30 * time.Second,
-		PeerDiscovery: PeerDiscoveryConfig{
-			Type: "static",
-		},
-		Transport: TransportConfig{
-			Type:     "udp",
-			BindAddr: ":0", // let the OS assign a port
-		},
-	}
-}
-
 func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
 	return &DefaultHealthChecker{
 		config:          config,
@@ -121,89 +74,6 @@ func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
 		healthCheckChan: make(chan Node, 100),
 		maxWorkers:      10,
 	}
-}
-
-// GossipHealthCheckerAdapter adapts gossip.GossipHealthChecker to implement HealthChecker
-type GossipHealthCheckerAdapter struct {
-	*gossip.GossipHealthChecker
-	config HealthCheckerConfig // kept separately since GossipHealthChecker uses its own config type
-}
-
-func (g *GossipHealthCheckerAdapter) UpdateConfig(newConfig HealthCheckerConfig) error {
-	g.config = newConfig
-	// TODO: push this down into the underlying GossipHealthChecker.
-	return nil
-}
-
-func (g *GossipHealthCheckerAdapter) GetConfig() HealthCheckerConfig {
-	return g.config
-}
-
-func (g *GossipHealthCheckerAdapter) IsEnabled() bool {
-	return g.config.Enabled
-}
-
-// AddHealthListener bridges the main package's HealthListener type across
-// the package boundary into the gossip package's own type.
-func (ghca *GossipHealthCheckerAdapter) AddHealthListener(listener HealthListener) {
-	ghca.GossipHealthChecker.AddHealthListener(gossip.HealthListener(listener))
-}
-
-// AddNode wraps a gyro.Node so it satisfies gossip.Node.
-func (ghca *GossipHealthCheckerAdapter) AddNode(node Node) {
-	ghca.GossipHealthChecker.AddNode(&nodeAdapter{node: node})
-}
-
-// nodeAdapter bridges gyro.Node to gossip.Node.
-type nodeAdapter struct {
-	node Node
-}
-
-func (na *nodeAdapter) ID() string {
-	return na.node.ID()
-}
-
-func (na *nodeAdapter) IsHealthy(ctx context.Context) bool {
-	return na.node.IsHealthy(ctx)
-}
-
-func (ghca *GossipHealthCheckerAdapter) Check(ctx context.Context, node Node) error {
-	return ghca.GossipHealthChecker.Check(ctx, &nodeAdapter{node: node})
-}
-
-// NewHealthChecker creates a HealthChecker: a GossipHealthCheckerAdapter if
-// config.Gossip is enabled, otherwise a DefaultHealthChecker.
-func NewHealthChecker(config HealthCheckerConfig) (HealthChecker, error) {
-	if config.Gossip != nil && config.Gossip.Enabled {
-		gossipConfig := gossip.GossipConfig{
-			Enabled:        config.Gossip.Enabled,
-			ProbingRatio:   config.Gossip.ProbingRatio,
-			GossipInterval: config.Gossip.GossipInterval,
-			MaxPeers:       config.Gossip.MaxPeers,
-			MessageTTL:     config.Gossip.MessageTTL,
-			PeerDiscovery: gossip.PeerDiscoveryConfig{
-				Type:   config.Gossip.PeerDiscovery.Type,
-				Config: config.Gossip.PeerDiscovery.Config,
-			},
-			Transport: gossip.TransportConfig{
-				Type:     config.Gossip.Transport.Type,
-				BindAddr: config.Gossip.Transport.BindAddr,
-				Config:   config.Gossip.Transport.Config,
-			},
-		}
-
-		gossipChecker, err := gossip.NewGossipHealthChecker(gossipConfig)
-		if err != nil {
-			return nil, err
-		}
-
-		return &GossipHealthCheckerAdapter{
-			GossipHealthChecker: gossipChecker,
-			config:              config,
-		}, nil
-	}
-
-	return NewDefaultHealthChecker(config), nil
 }
 
 // Check performs a health check on the given node.
