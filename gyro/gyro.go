@@ -34,12 +34,62 @@ type ServiceDiscovery interface {
 type StaticServiceDiscovery struct {
 	mu       sync.RWMutex
 	services map[string][]NodeInfo
+	watchers map[string][]chan []NodeInfo
 }
 
-// NewStaticServiceDiscovery .
-func NewStaticServiceDiscovery() *StaticServiceDiscovery {
-	return &StaticServiceDiscovery{
+// NewStaticServiceDiscovery creates a new static service discovery.
+func NewStaticServiceDiscovery(addresses []string) *StaticServiceDiscovery {
+	ssd := &StaticServiceDiscovery{
 		services: make(map[string][]NodeInfo),
+		watchers: make(map[string][]chan []NodeInfo),
+	}
+
+	// Convert addresses to NodeInfo
+	if len(addresses) > 0 {
+		nodes := make([]NodeInfo, len(addresses))
+		for i, addr := range addresses {
+			nodes[i] = NodeInfo{
+				ID:      fmt.Sprintf("node-%d", i+1),
+				Address: addr,
+			}
+		}
+		// Register nodes for a default service name (will be overridden by actual service name)
+		ssd.services["default"] = nodes
+	}
+
+	return ssd
+}
+
+// UpdateNodes updates the node list for a service.
+func (ssd *StaticServiceDiscovery) UpdateNodes(serviceName string, addresses []string) {
+	ssd.mu.Lock()
+	defer ssd.mu.Unlock()
+
+	// Convert addresses to NodeInfo
+	nodes := make([]NodeInfo, len(addresses))
+	for i, addr := range addresses {
+		nodes[i] = NodeInfo{
+			ID:      fmt.Sprintf("node-%d", i+1),
+			Address: addr,
+		}
+	}
+
+	ssd.services[serviceName] = nodes
+
+	// Also update default if this is the first service
+	if serviceName != "default" && len(ssd.services) == 1 {
+		ssd.services["default"] = nodes
+	}
+
+	// Notify all watchers of this service
+	if watchers, exists := ssd.watchers[serviceName]; exists {
+		for _, ch := range watchers {
+			select {
+			case ch <- nodes:
+			default:
+				// Channel is full or closed, skip
+			}
+		}
 	}
 }
 
@@ -50,6 +100,19 @@ func (ssd *StaticServiceDiscovery) Discover(ctx context.Context, serviceName str
 
 	nodes, exists := ssd.services[serviceName]
 	if !exists {
+		// Try to use default nodes if service-specific nodes don't exist
+		if defaultNodes, hasDefault := ssd.services["default"]; hasDefault {
+			// Copy default nodes and update service name
+			result := make([]NodeInfo, len(defaultNodes))
+			copy(result, defaultNodes)
+			// Register these nodes for the requested service
+			ssd.mu.RUnlock()
+			ssd.mu.Lock()
+			ssd.services[serviceName] = result
+			ssd.mu.Unlock()
+			ssd.mu.RLock()
+			return result, nil
+		}
 		return []NodeInfo{}, nil
 	}
 
@@ -61,12 +124,33 @@ func (ssd *StaticServiceDiscovery) Discover(ctx context.Context, serviceName str
 
 // Watch watches for changes in service nodes.
 func (ssd *StaticServiceDiscovery) Watch(ctx context.Context, serviceName string) (<-chan []NodeInfo, error) {
-	// For static discovery, just return the current nodes and close the channel
-	ch := make(chan []NodeInfo, 1)
+	ch := make(chan []NodeInfo, 10) // Buffered channel for updates
+
+	ssd.mu.Lock()
+	// Register this watcher
+	if ssd.watchers[serviceName] == nil {
+		ssd.watchers[serviceName] = make([]chan []NodeInfo, 0)
+	}
+	ssd.watchers[serviceName] = append(ssd.watchers[serviceName], ch)
+	ssd.mu.Unlock()
 
 	go func() {
-		defer close(ch)
+		defer func() {
+			// Unregister this watcher when done
+			ssd.mu.Lock()
+			if watchers, exists := ssd.watchers[serviceName]; exists {
+				for i, watcher := range watchers {
+					if watcher == ch {
+						ssd.watchers[serviceName] = append(watchers[:i], watchers[i+1:]...)
+						break
+					}
+				}
+			}
+			ssd.mu.Unlock()
+			close(ch)
+		}()
 
+		// Send initial nodes
 		nodes, err := ssd.Discover(ctx, serviceName)
 		if err != nil {
 			return
@@ -75,7 +159,12 @@ func (ssd *StaticServiceDiscovery) Watch(ctx context.Context, serviceName string
 		select {
 		case ch <- nodes:
 		case <-ctx.Done():
+			return
 		}
+
+		// Keep the channel open until context is cancelled
+		// Updates will be sent via UpdateNodes
+		<-ctx.Done()
 	}()
 
 	return ch, nil
@@ -294,10 +383,40 @@ func (c *Client) Start(ctx context.Context) error {
 	// Start service discovery watching
 	go c.watchServiceNodes(ctx)
 
+	// Start health monitoring in a separate goroutine
+	// This will wait for the locator to be initialized
+	go c.startHealthMonitoringWhenReady(ctx)
+
 	// Add config watcher
 	c.configManager.AddConfigWatcher(c.handleConfigChange)
 
 	return nil
+}
+
+// startHealthMonitoringWhenReady waits for the locator to be initialized and then starts health monitoring
+func (c *Client) startHealthMonitoringWhenReady(ctx context.Context) {
+	// Poll until locator is ready
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.mu.RLock()
+			locator := c.locator
+			c.mu.RUnlock()
+
+			if locator != nil {
+				// Locator is ready, start health monitoring
+				if healthAwarePool, ok := locator.(*HealthAwarePool); ok {
+					healthAwarePool.StartHealthMonitoring(ctx)
+				}
+				return
+			}
+		}
+	}
 }
 
 // Stop stops the client.
@@ -523,6 +642,10 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 		if err := locator.RemoveNode(nodeID); err != nil {
 			fmt.Printf("Failed to remove node %s: %v\n", nodeID, err)
 		} else {
+			// Also remove from health checker
+			if c.healthChecker != nil {
+				c.healthChecker.RemoveNode(nodeID)
+			}
 			fmt.Printf("Removed node: %s\n", nodeID)
 		}
 	}
@@ -538,6 +661,10 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 		if err := locator.AddNode(node); err != nil {
 			fmt.Printf("Failed to add node %s: %v\n", nodeInfo.ID, err)
 		} else {
+			// Also add to health checker
+			if c.healthChecker != nil {
+				c.healthChecker.AddNode(node)
+			}
 			fmt.Printf("Added node: %s\n", nodeInfo.ID)
 		}
 	}
@@ -550,6 +677,11 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 			continue
 		}
 
+		// Also remove from health checker
+		if c.healthChecker != nil {
+			c.healthChecker.RemoveNode(nodeInfo.ID)
+		}
+
 		node, err := c.nodeFactory.CreateNode(nodeInfo)
 		if err != nil {
 			fmt.Printf("Failed to create updated node %s: %v\n", nodeInfo.ID, err)
@@ -559,6 +691,10 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 		if err := locator.AddNode(node); err != nil {
 			fmt.Printf("Failed to add updated node %s: %v\n", nodeInfo.ID, err)
 		} else {
+			// Also add to health checker
+			if c.healthChecker != nil {
+				c.healthChecker.AddNode(node)
+			}
 			fmt.Printf("Updated node: %s\n", nodeInfo.ID)
 		}
 	}
@@ -619,6 +755,51 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 
 	fmt.Printf("Configuration update completed successfully\n")
 	return nil
+}
+
+// GetStats returns client statistics.
+func (c *Client) GetStats() HealthAwarePoolStats {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.locator == nil {
+		return HealthAwarePoolStats{}
+	}
+
+	// Count healthy/unhealthy nodes
+	allNodes := c.locator.GetAllNodes()
+	totalNodes := len(allNodes)
+	healthyCount := 0
+	for _, node := range allNodes {
+		if c.healthChecker.IsNodeHealthy(node.ID()) {
+			healthyCount++
+		}
+	}
+
+	return HealthAwarePoolStats{
+		TotalNodes:     totalNodes,
+		HealthyNodes:   healthyCount,
+		UnhealthyNodes: totalNodes - healthyCount,
+	}
+}
+
+// GetClientForKey returns a client for the given key.
+func (c *Client) GetClientForKey(ctx context.Context, key string) (interface{}, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.locator == nil {
+		return nil, fmt.Errorf("client not started")
+	}
+
+	node, err := c.locator.Get(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node for key %s: %w", key, err)
+	}
+
+	// Return the node itself for now
+	// In a real implementation, this would return a protocol-specific client
+	return node, nil
 }
 
 // locatorConfigEqual compares two locator configurations

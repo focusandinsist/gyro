@@ -1,2 +1,6 @@
-github.com/focusandinsist/consistent-go v0.0.0-20250901100356-02ec3b3ba4ed h1:dMmqtrkNR56O8xcayifACZ11x+dkzQEsRl3TzusI8uU=
-github.com/focusandinsist/consistent-go v0.0.0-20250901100356-02ec3b3ba4ed/go.mod h1:RexwRysvbsUahdzvA2W339eixuCFWHyPwYQnmA7jjS8=
+github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
+github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
+github.com/focusandinsist/consistent-go/consistent v0.0.0-20251018091552-189f7eecbd36 h1:Nxe5Ai6hB/ZiDnbgk27qeQO0FJg83Fs3nMSrF8o/6+s=
+github.com/focusandinsist/consistent-go/consistent v0.0.0-20251018091552-189f7eecbd36/go.mod h1:pQWw1cMNDe4DEbckaUfVMjH2eYWdbnD1yipO6TiJRbo=
+github.com/spaolacci/murmur3 v1.1.0 h1:7c1g84S4BPRrfL5Xrdp6fOJ206sU9y293DDHaoy0bLI=
+github.com/spaolacci/murmur3 v1.1.0/go.mod h1:JwIasOWyU6f++ZhiEuf87xNszmSA2myDM2Kzu9HwQUA=
