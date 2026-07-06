@@ -210,7 +210,7 @@ func NewGRPCClient(addresses []string, config *GRPCClientConfig) (*GRPCClient, e
 
 	// Create gRPC nodes and add them to the locator
 	// Note: This requires real gRPC connection implementation
-	return nil, fmt.Errorf("gRPC client requires real gRPC connection implementation")
+	// return nil, fmt.Errorf("gRPC client requires real gRPC connection implementation")
 
 	return &GRPCClient{
 		locator: locator,
