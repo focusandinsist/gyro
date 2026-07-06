@@ -38,7 +38,7 @@ func DefaultLocatorConfig() LocatorConfig {
 		PartitionCount:    271,
 		ReplicationFactor: 20,
 		Load:              1.25,
-		HashFunction:      "crc64",
+		HashFunction:      "xxhash",
 	}
 }
 
@@ -53,8 +53,12 @@ type ConsistentLocator struct {
 func NewConsistentLocator(config LocatorConfig) (*ConsistentLocator, error) {
 	var hasher consistent.Hasher
 	switch config.HashFunction {
+	case "", "xxhash":
+		hasher = consistent.NewXXHasher()
+	case "murmur3":
+		hasher = consistent.NewMurmurHash3Hasher()
 	default:
-		hasher = consistent.NewDefaultHasher()
+		return nil, fmt.Errorf("unknown hash function: %s", config.HashFunction)
 	}
 
 	consistentConfig := consistent.Config{

@@ -82,15 +82,15 @@ type GossipConfig struct {
 
 // PeerDiscoveryConfig configures peer discovery
 type PeerDiscoveryConfig struct {
-	Type   string                 `json:"type"` // "static", "consul", "kubernetes"
-	Config map[string]interface{} `json:"config"`
+	Type   string         `json:"type"` // "static", "consul", "kubernetes"
+	Config map[string]any `json:"config"`
 }
 
 // TransportConfig configures the transport layer
 type TransportConfig struct {
-	Type     string                 `json:"type"` // "udp", "http"
-	BindAddr string                 `json:"bind_addr"`
-	Config   map[string]interface{} `json:"config"`
+	Type     string         `json:"type"` // "udp", "http"
+	BindAddr string         `json:"bind_addr"`
+	Config   map[string]any `json:"config"`
 }
 
 // DefaultGossipConfig returns the default Gossip configuration

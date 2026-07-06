@@ -16,7 +16,7 @@ type RedisConnection interface {
 	Ping(ctx context.Context) error
 	Close() error
 	IsConnected() bool
-	GetNativeClient() interface{}
+	GetNativeClient() any
 }
 
 // DefaultRedisConnection wraps a real go-redis client.
@@ -72,7 +72,7 @@ func (c *DefaultRedisConnection) Ping(ctx context.Context) error {
 
 // GetNativeClient returns the underlying *redis.Client for direct use with
 // the full go-redis API.
-func (c *DefaultRedisConnection) GetNativeClient() interface{} {
+func (c *DefaultRedisConnection) GetNativeClient() any {
 	return c.client
 }
 
@@ -124,7 +124,7 @@ func (rn *RedisNode) Close() error {
 	return rn.conn.Close()
 }
 
-func (rn *RedisNode) GetNativeClient() interface{} {
+func (rn *RedisNode) GetNativeClient() any {
 	rn.mu.RLock()
 	defer rn.mu.RUnlock()
 
@@ -186,7 +186,7 @@ func NewRedisClient(addresses []string, config *RedisClientConfig) (*RedisClient
 	return &RedisClient{locator: locator, config: config}, nil
 }
 
-func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (interface{}, error) {
+func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (any, error) {
 	node, err := rc.locator.Get(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node for key '%s': %w", key, err)
@@ -205,13 +205,13 @@ func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (interfa
 	return nativeClient, nil
 }
 
-func (rc *RedisClient) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]interface{}, error) {
+func (rc *RedisClient) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]any, error) {
 	nodes, err := rc.locator.GetReplicas(ctx, key, replicaCount)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get replicas for key '%s': %w", key, err)
 	}
 
-	clients := make([]interface{}, 0, len(nodes))
+	clients := make([]any, 0, len(nodes))
 	for _, node := range nodes {
 		redisNode, ok := node.(*RedisNode)
 		if !ok {
@@ -227,9 +227,9 @@ func (rc *RedisClient) GetClientsForReplicas(ctx context.Context, key string, re
 	return clients, nil
 }
 
-func (rc *RedisClient) GetAllClients() map[string]interface{} {
+func (rc *RedisClient) GetAllClients() map[string]any {
 	nodes := rc.locator.GetAllNodes()
-	clients := make(map[string]interface{})
+	clients := make(map[string]any)
 
 	for _, node := range nodes {
 		redisNode, ok := node.(*RedisNode)

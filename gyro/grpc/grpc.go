@@ -21,7 +21,7 @@ type GRPCConnection interface {
 	Close() error
 	IsConnected() bool
 	GetState() string
-	GetNativeClient() interface{}
+	GetNativeClient() any
 }
 
 // DefaultGRPCConnection wraps a real *grpc.ClientConn.
@@ -100,7 +100,7 @@ func (c *DefaultGRPCConnection) Ping(ctx context.Context) error {
 
 // GetNativeClient returns the underlying *grpc.ClientConn. Callers create
 // their own generated service stubs from it, e.g. pb.NewUserServiceClient(conn).
-func (c *DefaultGRPCConnection) GetNativeClient() interface{} {
+func (c *DefaultGRPCConnection) GetNativeClient() any {
 	return c.conn
 }
 
@@ -151,7 +151,7 @@ func (gn *GRPCNode) Close() error {
 	return gn.conn.Close()
 }
 
-func (gn *GRPCNode) GetNativeClient() interface{} {
+func (gn *GRPCNode) GetNativeClient() any {
 	gn.mu.RLock()
 	defer gn.mu.RUnlock()
 
@@ -217,7 +217,7 @@ func NewGRPCClient(addresses []string, config *GRPCClientConfig) (*GRPCClient, e
 
 // GetClientForKey returns the native gRPC client for the given key.
 // Routes the key to the correct gRPC node and returns the native client for direct use.
-func (gc *GRPCClient) GetClientForKey(ctx context.Context, key string) (interface{}, error) {
+func (gc *GRPCClient) GetClientForKey(ctx context.Context, key string) (any, error) {
 	node, err := gc.locator.Get(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("gyro: failed to get node for key '%s': %w", key, err)
@@ -237,13 +237,13 @@ func (gc *GRPCClient) GetClientForKey(ctx context.Context, key string) (interfac
 }
 
 // GetClientsForReplicas returns native gRPC clients for replica nodes.
-func (gc *GRPCClient) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]interface{}, error) {
+func (gc *GRPCClient) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]any, error) {
 	nodes, err := gc.locator.GetReplicas(ctx, key, replicaCount)
 	if err != nil {
 		return nil, fmt.Errorf("gyro: failed to get replicas for key '%s': %w", key, err)
 	}
 
-	clients := make([]interface{}, 0, len(nodes))
+	clients := make([]any, 0, len(nodes))
 	for _, node := range nodes {
 		grpcNode, ok := node.(*GRPCNode)
 		if !ok {
@@ -260,9 +260,9 @@ func (gc *GRPCClient) GetClientsForReplicas(ctx context.Context, key string, rep
 }
 
 // GetAllClients returns native gRPC clients for all nodes.
-func (gc *GRPCClient) GetAllClients() map[string]interface{} {
+func (gc *GRPCClient) GetAllClients() map[string]any {
 	nodes := gc.locator.GetAllNodes()
-	clients := make(map[string]interface{})
+	clients := make(map[string]any)
 
 	for _, node := range nodes {
 		grpcNode, ok := node.(*GRPCNode)

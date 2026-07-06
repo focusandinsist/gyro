@@ -107,8 +107,8 @@ type PeerDiscovery interface {
 
 // PeerDiscoveryConfig configures peer discovery
 type PeerDiscoveryConfig struct {
-	Type   string                 `json:"type"` // "static", "consul", "kubernetes"
-	Config map[string]interface{} `json:"config"`
+	Type   string         `json:"type"` // "static", "consul", "kubernetes"
+	Config map[string]any `json:"config"`
 }
 
 // GossipTransport provides Gossip transport layer interface
@@ -129,9 +129,9 @@ type ReceivedMessage struct {
 
 // TransportConfig configures the transport layer
 type TransportConfig struct {
-	Type     string                 `json:"type"` // "udp", "http"
-	BindAddr string                 `json:"bind_addr"`
-	Config   map[string]interface{} `json:"config"`
+	Type     string         `json:"type"` // "udp", "http"
+	BindAddr string         `json:"bind_addr"`
+	Config   map[string]any `json:"config"`
 }
 
 // GossipStats contains Gossip statistics
@@ -522,7 +522,7 @@ func (ghc *GossipHealthChecker) performGossip(ctx context.Context) {
 // selectRandomPeers selects random peers
 func (ghc *GossipHealthChecker) selectRandomPeers(count int) []PeerInfo {
 	var peers []PeerInfo
-	ghc.knownPeers.Range(func(key, value interface{}) bool {
+	ghc.knownPeers.Range(func(key, value any) bool {
 		peer := value.(PeerInfo)
 		if peer.ID != ghc.selfPeerID {
 			peers = append(peers, peer)
@@ -544,7 +544,7 @@ func (ghc *GossipHealthChecker) selectRandomPeers(count int) []PeerInfo {
 func (ghc *GossipHealthChecker) prepareGossipMessage() *GossipMessage {
 	var nodeStates []*NodeHealthState
 
-	ghc.localState.Range(func(key, value interface{}) bool {
+	ghc.localState.Range(func(key, value any) bool {
 		state := value.(*NodeHealthState)
 		if !state.IsExpired() {
 			nodeStates = append(nodeStates, state)
@@ -588,7 +588,7 @@ func (ghc *GossipHealthChecker) peerWatchLoop(ctx context.Context) {
 // updateKnownPeers updates the known peers list
 func (ghc *GossipHealthChecker) updateKnownPeers(peers []PeerInfo) {
 	// Drop peers no longer present in the latest discovery result.
-	ghc.knownPeers.Range(func(key, value interface{}) bool {
+	ghc.knownPeers.Range(func(key, value any) bool {
 		peer := value.(PeerInfo)
 		found := false
 		for _, p := range peers {

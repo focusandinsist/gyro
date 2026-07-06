@@ -739,14 +739,14 @@ func (c *Client) GetStats() HealthAwarePoolStats {
 // nativeClientProvider is implemented by protocol adapters (e.g. RedisNode,
 // GRPCNode) that can hand back their underlying native client.
 type nativeClientProvider interface {
-	GetNativeClient() interface{}
+	GetNativeClient() any
 }
 
 // GetClientForKey returns the native protocol client (e.g. *redis.Client,
 // *grpc.ClientConn) for the node that owns the given key. If the configured
 // NodeFactory produces nodes that don't implement nativeClientProvider, the
 // Node itself is returned instead.
-func (c *Client) GetClientForKey(ctx context.Context, key string) (interface{}, error) {
+func (c *Client) GetClientForKey(ctx context.Context, key string) (any, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
