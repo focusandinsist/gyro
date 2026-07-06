@@ -783,7 +783,16 @@ func (c *Client) GetStats() HealthAwarePoolStats {
 	}
 }
 
-// GetClientForKey returns a client for the given key.
+// nativeClientProvider is implemented by protocol adapters (e.g. RedisNode,
+// GRPCNode) that can hand back their underlying native client.
+type nativeClientProvider interface {
+	GetNativeClient() interface{}
+}
+
+// GetClientForKey returns the native protocol client (e.g. *redis.Client,
+// *grpc.ClientConn) for the node that owns the given key. If the configured
+// NodeFactory produces nodes that don't implement nativeClientProvider, the
+// Node itself is returned instead.
 func (c *Client) GetClientForKey(ctx context.Context, key string) (interface{}, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -797,9 +806,17 @@ func (c *Client) GetClientForKey(ctx context.Context, key string) (interface{}, 
 		return nil, fmt.Errorf("failed to get node for key %s: %w", key, err)
 	}
 
-	// Return the node itself for now
-	// In a real implementation, this would return a protocol-specific client
-	return node, nil
+	provider, ok := node.(nativeClientProvider)
+	if !ok {
+		return node, nil
+	}
+
+	native := provider.GetNativeClient()
+	if native == nil {
+		return nil, fmt.Errorf("node %s has no healthy native client", node.ID())
+	}
+
+	return native, nil
 }
 
 // locatorConfigEqual compares two locator configurations
