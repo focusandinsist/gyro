@@ -5,11 +5,16 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// discardLogger is the default logger: silent until SetLogger is called.
+var discardLogger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
 
 // Node represents a node that can be health checked
 type Node interface {
@@ -23,12 +28,12 @@ type HealthListener func(nodeID string, healthy bool)
 // GossipConfig configures the Gossip health checker
 type GossipConfig struct {
 	Enabled        bool                `json:"enabled"`
-	ProbingRatio   float64             `json:"probing_ratio"`   // Ratio of nodes each client probes (0.1 = 10%)
-	GossipInterval time.Duration       `json:"gossip_interval"` // Gossip communication interval
-	PeerDiscovery  PeerDiscoveryConfig `json:"peer_discovery"`  // Peer discovery configuration
-	Transport      TransportConfig     `json:"transport"`       // Transport layer configuration
-	MaxPeers       int                 `json:"max_peers"`       // Maximum number of peers
-	MessageTTL     time.Duration       `json:"message_ttl"`     // Message time-to-live
+	ProbingRatio   float64             `json:"probing_ratio"` // fraction of nodes each client probes, e.g. 0.1 = 10%
+	GossipInterval time.Duration       `json:"gossip_interval"`
+	PeerDiscovery  PeerDiscoveryConfig `json:"peer_discovery"`
+	Transport      TransportConfig     `json:"transport"`
+	MaxPeers       int                 `json:"max_peers"`
+	MessageTTL     time.Duration       `json:"message_ttl"`
 }
 
 // NodeStatus represents the health status of a node
@@ -57,8 +62,8 @@ type NodeHealthState struct {
 	Status    NodeStatus    `json:"status"`
 	Timestamp time.Time     `json:"timestamp"`
 	Version   int64         `json:"version"`
-	Source    string        `json:"source"` // Information source (which client probed it)
-	TTL       time.Duration `json:"ttl"`    // Information time-to-live
+	Source    string        `json:"source"` // ID of the peer that produced this state
+	TTL       time.Duration `json:"ttl"`
 }
 
 // IsExpired checks if the state has expired
@@ -80,54 +85,38 @@ type GossipMessage struct {
 	MessageID  string             `json:"message_id"`
 	Timestamp  time.Time          `json:"timestamp"`
 	NodeStates []*NodeHealthState `json:"node_states"`
-	PeerStates []*PeerInfo        `json:"peer_states,omitempty"` // Optional: propagate peer information
+	PeerStates []*PeerInfo        `json:"peer_states,omitempty"` // optional peer-list propagation
 }
 
 // PeerInfo represents peer information
 type PeerInfo struct {
 	ID       string            `json:"id"`
-	Address  string            `json:"address"`  // Gossip communication address
-	Metadata map[string]string `json:"metadata"` // Additional information
+	Address  string            `json:"address"` // gossip transport address, not the node's service address
+	Metadata map[string]string `json:"metadata"`
 	LastSeen time.Time         `json:"last_seen"`
 	Version  int64             `json:"version"`
 }
 
 // PeerDiscovery provides peer discovery capabilities
 type PeerDiscovery interface {
-	// DiscoverPeers discovers currently available peers
 	DiscoverPeers(ctx context.Context) ([]PeerInfo, error)
-
-	// WatchPeers watches for peer changes
 	WatchPeers(ctx context.Context) (<-chan []PeerInfo, error)
-
-	// Register registers self as a discoverable peer
 	Register(ctx context.Context, self PeerInfo) error
-
-	// Unregister unregisters self
 	Unregister(ctx context.Context, peerID string) error
 }
 
 // PeerDiscoveryConfig configures peer discovery
 type PeerDiscoveryConfig struct {
-	Type   string                 `json:"type"`   // "static", "consul", "kubernetes"
-	Config map[string]interface{} `json:"config"` // Specific configuration
+	Type   string                 `json:"type"` // "static", "consul", "kubernetes"
+	Config map[string]interface{} `json:"config"`
 }
 
 // GossipTransport provides Gossip transport layer interface
 type GossipTransport interface {
-	// Start starts transport layer listening
 	Start(ctx context.Context, bindAddr string) error
-
-	// Send sends message to specified peer
 	Send(ctx context.Context, peer PeerInfo, msg *GossipMessage) error
-
-	// Receive returns the channel for receiving messages
 	Receive() <-chan *ReceivedMessage
-
-	// Stop stops the transport layer
 	Stop() error
-
-	// LocalAddr returns the local listening address
 	LocalAddr() string
 }
 
@@ -135,14 +124,14 @@ type GossipTransport interface {
 type ReceivedMessage struct {
 	From    PeerInfo
 	Message *GossipMessage
-	ReplyTo func(*GossipMessage) error // Optional reply function
+	ReplyTo func(*GossipMessage) error // optional
 }
 
 // TransportConfig configures the transport layer
 type TransportConfig struct {
-	Type     string                 `json:"type"`      // "udp", "http"
-	BindAddr string                 `json:"bind_addr"` // Listening address
-	Config   map[string]interface{} `json:"config"`    // Specific configuration
+	Type     string                 `json:"type"` // "udp", "http"
+	BindAddr string                 `json:"bind_addr"`
+	Config   map[string]interface{} `json:"config"`
 }
 
 // GossipStats contains Gossip statistics
@@ -158,32 +147,26 @@ type GossipStats struct {
 
 // GossipHealthChecker is a Gossip protocol-based health checker
 type GossipHealthChecker struct {
-	// Configuration
 	config GossipConfig
 
-	// Components
 	peerDiscovery PeerDiscovery
 	transport     GossipTransport
 	nodeProber    *NodeProber
 
-	// State management
 	localState *sync.Map // map[nodeID]*NodeHealthState
 	knownPeers *sync.Map // map[peerID]*PeerInfo
 
-	// Self information
 	selfPeerID string
 	selfPeer   PeerInfo
 
-	// Control
 	stopCh  chan struct{}
 	running atomic.Bool
 
-	// Statistics
 	stats *GossipStats
 
-	// Listeners
 	healthListeners []HealthListener
 	mu              sync.RWMutex
+	logger          atomic.Pointer[slog.Logger]
 }
 
 // NewGossipHealthChecker creates a new Gossip health checker
@@ -192,13 +175,11 @@ func NewGossipHealthChecker(config GossipConfig) (*GossipHealthChecker, error) {
 		return nil, fmt.Errorf("gossip health checker is not enabled")
 	}
 
-	// Generate unique Peer ID
 	peerID, err := generatePeerID()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate peer ID: %w", err)
 	}
 
-	// Create components
 	peerDiscovery, err := createPeerDiscovery(config.PeerDiscovery)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create peer discovery: %w", err)
@@ -225,8 +206,22 @@ func NewGossipHealthChecker(config GossipConfig) (*GossipHealthChecker, error) {
 		stopCh:        make(chan struct{}),
 		stats:         &GossipStats{},
 	}
+	ghc.logger.Store(discardLogger)
 
 	return ghc, nil
+}
+
+// SetLogger overrides the logger used for internal diagnostics. Passing nil
+// restores the default no-op logger.
+func (ghc *GossipHealthChecker) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = discardLogger
+	}
+	ghc.logger.Store(logger)
+}
+
+func (ghc *GossipHealthChecker) log() *slog.Logger {
+	return ghc.logger.Load()
 }
 
 // generatePeerID generates a unique Peer ID
@@ -273,12 +268,10 @@ func (ghc *GossipHealthChecker) Start(ctx context.Context) error {
 		return fmt.Errorf("gossip health checker is already running")
 	}
 
-	// 1. Start transport layer
 	if err := ghc.transport.Start(ctx, ghc.config.Transport.BindAddr); err != nil {
 		return fmt.Errorf("failed to start transport: %w", err)
 	}
 
-	// 2. Set self information
 	ghc.selfPeer = PeerInfo{
 		ID:       ghc.selfPeerID,
 		Address:  ghc.transport.LocalAddr(),
@@ -286,16 +279,14 @@ func (ghc *GossipHealthChecker) Start(ctx context.Context) error {
 		Version:  1,
 	}
 
-	// 3. Register self to peer discovery
 	if err := ghc.peerDiscovery.Register(ctx, ghc.selfPeer); err != nil {
 		return fmt.Errorf("failed to register self peer: %w", err)
 	}
 
-	// 4. Start worker loops
-	go ghc.probingLoop(ctx)   // Active probing loop
-	go ghc.gossipLoop(ctx)    // Gossip communication loop
-	go ghc.peerWatchLoop(ctx) // Peer watching loop
-	go ghc.messageLoop(ctx)   // Message processing loop
+	go ghc.probingLoop(ctx)
+	go ghc.gossipLoop(ctx)
+	go ghc.peerWatchLoop(ctx)
+	go ghc.messageLoop(ctx)
 
 	ghc.running.Store(true)
 	return nil
@@ -310,12 +301,10 @@ func (ghc *GossipHealthChecker) Stop() error {
 	ghc.running.Store(false)
 	close(ghc.stopCh)
 
-	// Unregister self
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ghc.peerDiscovery.Unregister(ctx, ghc.selfPeerID)
 
-	// Stop transport layer
 	return ghc.transport.Stop()
 }
 
@@ -342,11 +331,11 @@ func (ghc *GossipHealthChecker) IsNodeHealthy(nodeID string) bool {
 	if state, ok := ghc.localState.Load(nodeID); ok {
 		healthState := state.(*NodeHealthState)
 		if healthState.IsExpired() {
-			return false // Expired information is considered unhealthy
+			return false // stale information is treated as unhealthy
 		}
 		return healthState.Status == NodeStatusUp
 	}
-	return true // Unknown nodes are considered healthy by default
+	return true // no data yet, assume healthy
 }
 
 // AddHealthListener adds a health status change listener
@@ -377,11 +366,10 @@ func (ghc *GossipHealthChecker) selectNodesToProbe(allNodes []Node, ratio float6
 
 	count := int(math.Ceil(float64(len(allNodes)) * ratio))
 	if count == 0 && len(allNodes) > 0 {
-		count = 1 // Probe at least one node
+		count = 1
 	}
 
-	// TODO: Implement smart selection algorithm (consider last probe time, node importance, etc.)
-	// Simple random selection implementation here
+	// TODO: smarter selection (last probe time, node importance, etc.) instead of a fixed prefix.
 	if count >= len(allNodes) {
 		return allNodes
 	}
@@ -410,16 +398,13 @@ func (ghc *GossipHealthChecker) probingLoop(ctx context.Context) {
 
 // performProbing performs the probing
 func (ghc *GossipHealthChecker) performProbing(ctx context.Context) {
-	// 1. Get all nodes that need monitoring
 	allNodes := ghc.getAllMonitoredNodes()
 	if len(allNodes) == 0 {
 		return
 	}
 
-	// 2. Select nodes to probe based on ProbingRatio
 	nodesToProbe := ghc.selectNodesToProbe(allNodes, ghc.config.ProbingRatio)
 
-	// 3. Concurrently probe selected nodes
 	var wg sync.WaitGroup
 	for _, node := range nodesToProbe {
 		wg.Add(1)
@@ -433,8 +418,8 @@ func (ghc *GossipHealthChecker) performProbing(ctx context.Context) {
 
 // getAllMonitoredNodes gets all monitored nodes
 func (ghc *GossipHealthChecker) getAllMonitoredNodes() []Node {
-	// TODO: Need to get node list from external source
-	// Return empty list for now, actual implementation needs integration with Locator
+	// TODO: this needs to source the node list from the Locator; returns
+	// empty until that integration exists, so probing is currently a no-op.
 	return []Node{}
 }
 
@@ -446,7 +431,6 @@ func (ghc *GossipHealthChecker) probeNode(ctx context.Context, node Node) {
 		status = NodeStatusUp
 	}
 
-	// Update local state
 	ghc.updateNodeState(node.ID(), status, ghc.selfPeerID)
 	ghc.stats.NodesProbed.Add(1)
 }
@@ -455,13 +439,11 @@ func (ghc *GossipHealthChecker) probeNode(ctx context.Context, node Node) {
 func (ghc *GossipHealthChecker) updateNodeState(nodeID string, status NodeStatus, source string) {
 	now := time.Now()
 
-	// Get current state
 	var currentState *NodeHealthState
 	if state, ok := ghc.localState.Load(nodeID); ok {
 		currentState = state.(*NodeHealthState)
 	}
 
-	// Create new state
 	newState := &NodeHealthState{
 		NodeID:    nodeID,
 		Status:    status,
@@ -470,22 +452,19 @@ func (ghc *GossipHealthChecker) updateNodeState(nodeID string, status NodeStatus
 		TTL:       ghc.config.MessageTTL,
 	}
 
-	// Set version number
 	if currentState != nil {
 		if currentState.Status != status {
-			newState.Version = currentState.Version + 1 // Increment version when status changes
+			newState.Version = currentState.Version + 1 // bump version only on a real status change
 		} else {
-			newState.Version = currentState.Version // Keep version when status unchanged
+			newState.Version = currentState.Version
 		}
 	} else {
-		newState.Version = 1 // New node starts from version 1
+		newState.Version = 1
 	}
 
-	// Store new state
 	ghc.localState.Store(nodeID, newState)
 	ghc.stats.StateUpdates.Add(1)
 
-	// Notify listeners if status changed
 	if currentState == nil || currentState.Status != status {
 		ghc.notifyHealthChange(nodeID, status == NodeStatusUp)
 	}
@@ -522,16 +501,13 @@ func (ghc *GossipHealthChecker) gossipLoop(ctx context.Context) {
 
 // performGossip performs Gossip communication
 func (ghc *GossipHealthChecker) performGossip(ctx context.Context) {
-	// 1. Select random peers
-	peers := ghc.selectRandomPeers(3) // Communicate with 3 peers each time
+	peers := ghc.selectRandomPeers(3)
 	if len(peers) == 0 {
 		return
 	}
 
-	// 2. Prepare state information to send
 	msg := ghc.prepareGossipMessage()
 
-	// 3. Send concurrently to selected peers
 	for _, peer := range peers {
 		go func(p PeerInfo) {
 			if err := ghc.transport.Send(ctx, p, msg); err != nil {
@@ -548,13 +524,13 @@ func (ghc *GossipHealthChecker) selectRandomPeers(count int) []PeerInfo {
 	var peers []PeerInfo
 	ghc.knownPeers.Range(func(key, value interface{}) bool {
 		peer := value.(PeerInfo)
-		if peer.ID != ghc.selfPeerID { // Exclude self
+		if peer.ID != ghc.selfPeerID {
 			peers = append(peers, peer)
 		}
 		return true
 	})
 
-	// Simple random selection (should use better random algorithm in practice)
+	// Not truly random - just takes the first `count`. Good enough for now.
 	if len(peers) <= count {
 		return peers
 	}
@@ -568,16 +544,14 @@ func (ghc *GossipHealthChecker) selectRandomPeers(count int) []PeerInfo {
 func (ghc *GossipHealthChecker) prepareGossipMessage() *GossipMessage {
 	var nodeStates []*NodeHealthState
 
-	// Collect all local states
 	ghc.localState.Range(func(key, value interface{}) bool {
 		state := value.(*NodeHealthState)
-		if !state.IsExpired() { // Only send non-expired states
+		if !state.IsExpired() {
 			nodeStates = append(nodeStates, state)
 		}
 		return true
 	})
 
-	// Generate message ID
 	msgID, _ := generatePeerID()
 
 	return &GossipMessage{
@@ -592,7 +566,7 @@ func (ghc *GossipHealthChecker) prepareGossipMessage() *GossipMessage {
 func (ghc *GossipHealthChecker) peerWatchLoop(ctx context.Context) {
 	peersCh, err := ghc.peerDiscovery.WatchPeers(ctx)
 	if err != nil {
-		fmt.Printf("Failed to watch peers: %v\n", err)
+		ghc.log().Error("failed to watch peers", "error", err)
 		return
 	}
 
@@ -613,7 +587,7 @@ func (ghc *GossipHealthChecker) peerWatchLoop(ctx context.Context) {
 
 // updateKnownPeers updates the known peers list
 func (ghc *GossipHealthChecker) updateKnownPeers(peers []PeerInfo) {
-	// Clean up expired peers
+	// Drop peers no longer present in the latest discovery result.
 	ghc.knownPeers.Range(func(key, value interface{}) bool {
 		peer := value.(PeerInfo)
 		found := false
@@ -629,9 +603,8 @@ func (ghc *GossipHealthChecker) updateKnownPeers(peers []PeerInfo) {
 		return true
 	})
 
-	// Add new peers
 	for _, peer := range peers {
-		if peer.ID != ghc.selfPeerID { // Exclude self
+		if peer.ID != ghc.selfPeerID {
 			ghc.knownPeers.Store(peer.ID, peer)
 		}
 	}
@@ -668,17 +641,14 @@ func (ghc *GossipHealthChecker) handleReceivedMessage(receivedMsg *ReceivedMessa
 		return
 	}
 
-	// Ignore messages sent by self
 	if msg.SenderID == ghc.selfPeerID {
 		return
 	}
 
-	// Handle node state updates
 	for _, nodeState := range msg.NodeStates {
 		ghc.mergeNodeState(nodeState)
 	}
 
-	// Handle peer state updates (if any)
 	if len(msg.PeerStates) > 0 {
 		peerSlice := make([]PeerInfo, len(msg.PeerStates))
 		for i, peer := range msg.PeerStates {
@@ -688,16 +658,15 @@ func (ghc *GossipHealthChecker) handleReceivedMessage(receivedMsg *ReceivedMessa
 	}
 }
 
-// mergeNodeState merges node state (conflict resolution)
+// mergeNodeState merges an incoming node state into local state, resolving
+// conflicts by trusting whichever state is newer (by version, then timestamp).
 func (ghc *GossipHealthChecker) mergeNodeState(incomingState *NodeHealthState) {
 	if incomingState.IsExpired() {
-		return // Ignore expired state
+		return
 	}
 
-	// Get current local state
 	currentValue, exists := ghc.localState.Load(incomingState.NodeID)
 	if !exists {
-		// New node, accept directly
 		ghc.localState.Store(incomingState.NodeID, incomingState)
 		ghc.stats.StateUpdates.Add(1)
 		ghc.notifyHealthChange(incomingState.NodeID, incomingState.Status == NodeStatusUp)
@@ -706,32 +675,30 @@ func (ghc *GossipHealthChecker) mergeNodeState(incomingState *NodeHealthState) {
 
 	currentState := currentValue.(*NodeHealthState)
 
-	// Conflict resolution: trust whoever has newer message
 	if incomingState.IsNewerThan(currentState) {
 		oldStatus := currentState.Status
 		ghc.localState.Store(incomingState.NodeID, incomingState)
 		ghc.stats.StateUpdates.Add(1)
 
-		// Notify listeners if status changed
 		if oldStatus != incomingState.Status {
 			ghc.notifyHealthChange(incomingState.NodeID, incomingState.Status == NodeStatusUp)
 		}
 	}
 }
 
-// Check HealthChecker interface
+// Check implements HealthChecker. In Gossip mode this triggers an immediate
+// manual probe rather than waiting for the next probing-loop tick.
 func (ghc *GossipHealthChecker) Check(ctx context.Context, node Node) error {
-	// In Gossip mode, Check method is mainly used for manual probe triggering
 	ghc.probeNode(ctx, node)
 	return nil
 }
 
-// StartMonitoring HealthChecker interface
+// StartMonitoring implements HealthChecker.
 func (ghc *GossipHealthChecker) StartMonitoring(ctx context.Context) {
 	ghc.Start(ctx)
 }
 
-// StopMonitoring HealthChecker interface
+// StopMonitoring implements HealthChecker.
 func (ghc *GossipHealthChecker) StopMonitoring() {
 	ghc.Stop()
 }

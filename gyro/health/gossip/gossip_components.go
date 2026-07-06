@@ -61,7 +61,6 @@ func (np *NodeProber) Start() {
 
 	np.running = true
 
-	// Start worker goroutines
 	for i := 0; i < np.config.MaxConcurrentJobs; i++ {
 		go np.worker()
 	}
@@ -92,9 +91,7 @@ func (np *NodeProber) ProbeAsync(ctx context.Context, node Node) <-chan *ProbeRe
 
 	select {
 	case np.jobCh <- job:
-		// Task submitted
 	default:
-		// Queue full, return error directly
 		go func() {
 			resultCh <- &ProbeResult{
 				NodeID:  node.ID(),
@@ -123,11 +120,9 @@ func (np *NodeProber) worker() {
 func (np *NodeProber) executeProbe(job *ProbeJob) {
 	start := time.Now()
 
-	// Create context with timeout
 	ctx, cancel := context.WithTimeout(job.Ctx, np.config.Timeout)
 	defer cancel()
 
-	// Execute health check
 	healthy := job.Node.IsHealthy(ctx)
 	latency := time.Since(start)
 
@@ -137,15 +132,14 @@ func (np *NodeProber) executeProbe(job *ProbeJob) {
 		Latency: latency,
 	}
 
-	// Send result
 	select {
 	case job.Result <- result:
 	case <-time.After(time.Second):
-		// Timeout, abandon sending result
+		// Caller stopped waiting; drop the result rather than block forever.
 	}
 }
 
-// StaticPeerDiscovery static peer discovery
+// StaticPeerDiscovery is a fixed, in-memory PeerDiscovery.
 type StaticPeerDiscovery struct {
 	mu    sync.RWMutex
 	peers []PeerInfo
@@ -183,7 +177,6 @@ func (spd *StaticPeerDiscovery) WatchPeers(ctx context.Context) (<-chan []PeerIn
 	go func() {
 		defer close(ch)
 
-		// Send initial peer list
 		peers, _ := spd.DiscoverPeers(ctx)
 		select {
 		case ch <- peers:
@@ -191,7 +184,7 @@ func (spd *StaticPeerDiscovery) WatchPeers(ctx context.Context) (<-chan []PeerIn
 			return
 		}
 
-		// Static discovery has no changes, just wait for context cancellation
+		// The peer set is fixed, so there's nothing further to watch for.
 		<-ctx.Done()
 	}()
 
@@ -200,17 +193,15 @@ func (spd *StaticPeerDiscovery) WatchPeers(ctx context.Context) (<-chan []PeerIn
 
 // Register registers a peer
 func (spd *StaticPeerDiscovery) Register(ctx context.Context, self PeerInfo) error {
-	// Static discovery does not support dynamic registration
-	return nil
+	return nil // static discovery has a fixed peer set; nothing to register
 }
 
 // Unregister unregisters a peer
 func (spd *StaticPeerDiscovery) Unregister(ctx context.Context, peerID string) error {
-	// Static discovery does not support dynamic unregistration
-	return nil
+	return nil // static discovery has a fixed peer set; nothing to unregister
 }
 
-// UDPGossipTransport UDP transport layer
+// UDPGossipTransport is a GossipTransport implementation over UDP.
 type UDPGossipTransport struct {
 	conn    *net.UDPConn
 	recvCh  chan *ReceivedMessage
@@ -236,13 +227,11 @@ func (ugt *UDPGossipTransport) Start(ctx context.Context, bindAddr string) error
 		return fmt.Errorf("UDP transport is already running")
 	}
 
-	// Resolve address
 	addr, err := net.ResolveUDPAddr("udp", bindAddr)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
 	}
 
-	// Listen on UDP port
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen UDP: %w", err)
@@ -251,7 +240,6 @@ func (ugt *UDPGossipTransport) Start(ctx context.Context, bindAddr string) error
 	ugt.conn = conn
 	ugt.running = true
 
-	// Start receive goroutine
 	go ugt.receiveLoop()
 
 	return nil
@@ -287,21 +275,17 @@ func (ugt *UDPGossipTransport) Send(ctx context.Context, peer PeerInfo, msg *Gos
 		return fmt.Errorf("UDP transport is not running")
 	}
 
-	// Serialize message
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	// Resolve target address
 	addr, err := net.ResolveUDPAddr("udp", peer.Address)
 	if err != nil {
 		return fmt.Errorf("failed to resolve peer address: %w", err)
 	}
 
-	// Send data
-	_, err = conn.WriteToUDP(data, addr)
-	if err != nil {
+	if _, err := conn.WriteToUDP(data, addr); err != nil {
 		return fmt.Errorf("failed to send UDP message: %w", err)
 	}
 
@@ -326,43 +310,37 @@ func (ugt *UDPGossipTransport) LocalAddr() string {
 
 // receiveLoop is the receive loop
 func (ugt *UDPGossipTransport) receiveLoop() {
-	buffer := make([]byte, 64*1024) // 64KB buffer
+	buffer := make([]byte, 64*1024)
 
 	for {
 		select {
 		case <-ugt.stopCh:
 			return
 		default:
-			// Set read timeout
 			ugt.conn.SetReadDeadline(time.Now().Add(time.Second))
 
 			n, addr, err := ugt.conn.ReadFromUDP(buffer)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					continue // Timeout, continue loop
+					continue
 				}
-				return // Other error, exit
+				return
 			}
 
-			// Parse message
 			var msg GossipMessage
 			if err := json.Unmarshal(buffer[:n], &msg); err != nil {
-				continue // Parse failed, ignore message
+				continue
 			}
 
-			// Create received message
 			receivedMsg := &ReceivedMessage{
-				From: PeerInfo{
-					Address: addr.String(),
-				},
+				From:    PeerInfo{Address: addr.String()},
 				Message: &msg,
 			}
 
-			// Send to receive channel
 			select {
 			case ugt.recvCh <- receivedMsg:
 			default:
-				// Channel full, drop message
+				// Receiver isn't keeping up; drop rather than block the read loop.
 			}
 		}
 	}

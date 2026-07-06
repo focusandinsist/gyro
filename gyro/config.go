@@ -14,41 +14,24 @@ type ConfigManager struct {
 	watchers []ConfigWatcher
 }
 
-// ClientConfig the configuration for Gyro clients.
-// This is a composition of individual component configurations.
+// ClientConfig is the configuration for Gyro clients, composed of the
+// individual component configs below.
 type ClientConfig struct {
-	// Locator configures the connection locator behavior.
-	Locator LocatorConfig `json:"locator"`
-
-	// HealthChecker configures health checking behavior.
+	Locator       LocatorConfig       `json:"locator"`
 	HealthChecker HealthCheckerConfig `json:"health_checker"`
-
-	// Connection configures connection-specific behavior.
-	Connection ConnectionConfig `json:"connection"`
+	Connection    ConnectionConfig    `json:"connection"`
 }
 
 // ConnectionConfig configures connection-specific behavior.
 type ConnectionConfig struct {
-	// MaxIdleConns is the maximum number of idle connections per node.
-	MaxIdleConns int `json:"max_idle_conns"`
-
-	// MaxActiveConns is the maximum number of active connections per node.
-	MaxActiveConns int `json:"max_active_conns"`
-
-	// IdleTimeout is the timeout for idle connections.
-	IdleTimeout time.Duration `json:"idle_timeout"`
-
-	// ConnectTimeout is the timeout for establishing connections.
+	MaxIdleConns   int           `json:"max_idle_conns"`
+	MaxActiveConns int           `json:"max_active_conns"`
+	IdleTimeout    time.Duration `json:"idle_timeout"`
 	ConnectTimeout time.Duration `json:"connect_timeout"`
-
-	// ReadTimeout is the timeout for read operations.
-	ReadTimeout time.Duration `json:"read_timeout"`
-
-	// WriteTimeout is the timeout for write operations.
-	WriteTimeout time.Duration `json:"write_timeout"`
+	ReadTimeout    time.Duration `json:"read_timeout"`
+	WriteTimeout   time.Duration `json:"write_timeout"`
 }
 
-// DefaultConnectionConfig .
 func DefaultConnectionConfig() ConnectionConfig {
 	return ConnectionConfig{
 		MaxIdleConns:   10,
@@ -60,7 +43,6 @@ func DefaultConnectionConfig() ConnectionConfig {
 	}
 }
 
-// DefaultClientConfig .
 func DefaultClientConfig() *ClientConfig {
 	return &ClientConfig{
 		Locator:       DefaultLocatorConfig(),
@@ -89,7 +71,7 @@ func (cm *ConfigManager) GetConfig() *ClientConfig {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
-	// Return a deep copy
+	// JSON round-trip as a cheap deep copy, so callers can't mutate our internal state.
 	configJSON, _ := json.Marshal(cm.config)
 	var configCopy ClientConfig
 	json.Unmarshal(configJSON, &configCopy)
@@ -109,10 +91,9 @@ func (cm *ConfigManager) UpdateConfig(newConfig *ClientConfig) error {
 	copy(watchers, cm.watchers)
 	cm.mu.Unlock()
 
-	// Notify all watchers
 	for _, watcher := range watchers {
 		if err := watcher(oldConfig, newConfig); err != nil {
-			// TODO:handle this gracefully??
+			// TODO: a failing watcher aborts the rest; consider collecting all errors instead.
 			return fmt.Errorf("config watcher failed: %w", err)
 		}
 	}

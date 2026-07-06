@@ -76,7 +76,7 @@ func (c *DefaultRedisConnection) GetNativeClient() interface{} {
 	return c.client
 }
 
-// RedisNode .
+// RedisNode adapts a Redis connection to the gyro.Node interface.
 type RedisNode struct {
 	id      string
 	address string
@@ -269,7 +269,6 @@ func NewRedisNodeFactory() *RedisNodeFactory {
 
 // CreateNode creates a new Redis node from NodeInfo.
 func (f *RedisNodeFactory) CreateNode(info gyro.NodeInfo) (gyro.Node, error) {
-	// Create Redis connection
 	conn, err := NewRedisConnection(info.Address, f.config.Connection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Redis connection to %s: %w", info.Address, err)

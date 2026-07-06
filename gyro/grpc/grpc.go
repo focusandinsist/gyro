@@ -190,7 +190,6 @@ func NewGRPCClient(addresses []string, config *GRPCClientConfig) (*GRPCClient, e
 		config = DefaultGRPCClientConfig()
 	}
 
-	// Create the connection locator
 	locator, err := gyro.NewConsistentLocator(config.Locator)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection locator: %w", err)
@@ -303,7 +302,6 @@ func NewGRPCNodeFactory() *GRPCNodeFactory {
 
 // CreateNode creates a new gRPC node from NodeInfo.
 func (f *GRPCNodeFactory) CreateNode(info gyro.NodeInfo) (gyro.Node, error) {
-	// Create gRPC connection
 	conn, err := NewGRPCConnection(info.Address, f.config.Connection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC connection to %s: %w", info.Address, err)
