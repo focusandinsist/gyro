@@ -13,7 +13,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
-	"gyro/gyro"
+	"github.com/focusandinsist/gyro/gyro"
 )
 
 type GRPCConnection interface {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"gyro/gyro"
+	"github.com/focusandinsist/gyro/gyro"
 )
 
 type testRedisNativeClient struct {

@@ -41,7 +41,7 @@ func TestStaticServiceDiscoveryMutationsNotifyWatchers(t *testing.T) {
 	assertNodeSnapshot(t, updates, []NodeInfo{node2})
 
 	discovery.UpdateNodes("orders", []string{"127.0.0.1:7001"})
-	assertNodeSnapshot(t, updates, []NodeInfo{{ID: "node-1", Address: "127.0.0.1:7001"}})
+	assertNodeSnapshot(t, updates, []NodeInfo{{ID: "127.0.0.1:7001", Address: "127.0.0.1:7001"}})
 }
 
 func TestStaticServiceDiscoverySlowWatcherEventuallyReceivesLatestSnapshot(t *testing.T) {
@@ -133,6 +133,30 @@ func TestStaticServiceDiscoveryConcurrentDiscoverDoesNotOverwriteMutation(t *tes
 		}
 		if len(got) != 1 || got[0].ID != explicit[0].ID || got[0].Address != explicit[0].Address {
 			t.Fatalf("iteration %d: Discover overwrote explicit topology with stale default: %#v", i, got)
+		}
+	}
+}
+
+func TestStaticServiceDiscoveryAddressIDsSurviveReordering(t *testing.T) {
+	addresses := []string{"127.0.0.1:8001", "127.0.0.1:8002", "127.0.0.1:8003"}
+	discovery := NewStaticServiceDiscovery(addresses)
+	before, err := discovery.Discover(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("initial Discover failed: %v", err)
+	}
+	beforeIDs := make(map[string]string, len(before))
+	for _, node := range before {
+		beforeIDs[node.Address] = node.ID
+	}
+
+	discovery.UpdateNodes("orders", []string{addresses[2], addresses[0], addresses[1]})
+	after, err := discovery.Discover(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("Discover after reorder failed: %v", err)
+	}
+	for _, node := range after {
+		if node.ID != beforeIDs[node.Address] {
+			t.Fatalf("address %q changed ID from %q to %q after reorder", node.Address, beforeIDs[node.Address], node.ID)
 		}
 	}
 }

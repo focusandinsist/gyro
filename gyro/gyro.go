@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,13 +49,7 @@ func NewStaticServiceDiscovery(addresses []string) *StaticServiceDiscovery {
 	}
 
 	if len(addresses) > 0 {
-		nodes := make([]NodeInfo, len(addresses))
-		for i, addr := range addresses {
-			nodes[i] = NodeInfo{
-				ID:      fmt.Sprintf("node-%d", i+1),
-				Address: addr,
-			}
-		}
+		nodes := nodeInfosFromAddresses(addresses)
 		// Stored under "default" so Discover can serve any service name
 		// passed to NewClient without requiring a matching SetNodes call.
 		ssd.services["default"] = nodes
@@ -68,13 +63,7 @@ func (ssd *StaticServiceDiscovery) UpdateNodes(serviceName string, addresses []s
 	ssd.mu.Lock()
 	defer ssd.mu.Unlock()
 
-	nodes := make([]NodeInfo, len(addresses))
-	for i, addr := range addresses {
-		nodes[i] = NodeInfo{
-			ID:      fmt.Sprintf("node-%d", i+1),
-			Address: addr,
-		}
-	}
+	nodes := nodeInfosFromAddresses(addresses)
 
 	ssd.services[serviceName] = nodes
 	ssd.publishLocked(serviceName)
@@ -234,6 +223,25 @@ func cloneNodeInfo(node NodeInfo) NodeInfo {
 	return result
 }
 
+func nodeInfosFromAddresses(addresses []string) []NodeInfo {
+	nodes := make([]NodeInfo, 0, len(addresses))
+	seen := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		if _, exists := seen[address]; exists {
+			continue
+		}
+		seen[address] = struct{}{}
+		nodes = append(nodes, NodeInfo{ID: address, Address: address})
+	}
+	return nodes
+}
+
+func sortNodeInfosByID(nodes []NodeInfo) {
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].ID < nodes[j].ID
+	})
+}
+
 // ClientHealth represents the health status of the client
 type ClientHealth struct {
 	ServiceDiscoveryHealthy   bool      `json:"service_discovery_healthy"`
@@ -340,6 +348,8 @@ func (c *Client) buildLocatorUnsafe(config *ClientConfig, nodeFactory NodeFactor
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover initial nodes: %w", err)
 	}
+	nodeInfos = cloneNodeInfos(nodeInfos)
+	sortNodeInfosByID(nodeInfos)
 
 	baseLocator, err := NewConsistentLocator(config.Locator)
 	if err != nil {
@@ -661,6 +671,7 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 			nodesToRemove = append(nodesToRemove, nodeID)
 		}
 	}
+	sort.Strings(nodesToRemove)
 
 	var nodesToAdd []NodeInfo
 	for nodeID, nodeInfo := range newNodeMap {
@@ -668,6 +679,7 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 			nodesToAdd = append(nodesToAdd, nodeInfo)
 		}
 	}
+	sortNodeInfosByID(nodesToAdd)
 
 	var nodesToUpdate []NodeInfo
 	for nodeID, newNodeInfo := range newNodeMap {
@@ -677,6 +689,7 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 			}
 		}
 	}
+	sortNodeInfosByID(nodesToUpdate)
 
 	locator := c.getLocator()
 	if locator == nil {
