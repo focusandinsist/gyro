@@ -163,31 +163,43 @@ func (gn *GRPCNode) GetNativeClient() any {
 }
 
 type GRPCClientConfig struct {
-	Locator    gyro.LocatorConfig    `json:"locator"`
-	Connection gyro.ConnectionConfig `json:"connection"`
+	Locator       gyro.LocatorConfig       `json:"locator"`
+	HealthChecker gyro.HealthCheckerConfig `json:"health_checker"`
+	Connection    gyro.ConnectionConfig    `json:"connection"`
 }
 
 func DefaultGRPCClientConfig() *GRPCClientConfig {
 	return &GRPCClientConfig{
-		Locator:    gyro.DefaultLocatorConfig(),
-		Connection: gyro.DefaultConnectionConfig(),
+		Locator:       gyro.DefaultLocatorConfig(),
+		HealthChecker: gyro.DefaultHealthCheckerConfig(),
+		Connection:    gyro.DefaultConnectionConfig(),
 	}
 }
 
 type GRPCClient struct {
 	locator gyro.Locator
 	config  *GRPCClientConfig
+	cancel  context.CancelFunc
 }
 
 // NewGRPCClient creates a client-side sharded gRPC cluster client. Each
 // address gets its own *grpc.ClientConn; routing between them is done via
 // consistent hashing.
 func NewGRPCClient(addresses []string, config *GRPCClientConfig) (*GRPCClient, error) {
+	return newGRPCClient(addresses, config, nil, nil)
+}
+
+func newGRPCClient(addresses []string, config *GRPCClientConfig, factory *GRPCNodeFactory, healthChecker gyro.HealthChecker) (*GRPCClient, error) {
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("at least one gRPC address is required")
 	}
 	if config == nil {
 		config = DefaultGRPCClientConfig()
+	}
+	configSnapshot := *config
+	config = &configSnapshot
+	if err := gyro.ValidateHealthCheckerConfig(config.HealthChecker); err != nil {
+		return nil, fmt.Errorf("invalid health checker config: %w", err)
 	}
 
 	locator, err := gyro.NewConsistentLocator(config.Locator)
@@ -195,23 +207,35 @@ func NewGRPCClient(addresses []string, config *GRPCClientConfig) (*GRPCClient, e
 		return nil, fmt.Errorf("failed to create connection locator: %w", err)
 	}
 
-	factory := &GRPCNodeFactory{config: config}
+	if factory == nil {
+		factory = &GRPCNodeFactory{config: config, newConnection: NewGRPCConnection}
+	}
 	for i, addr := range addresses {
 		node, err := factory.CreateNode(gyro.NodeInfo{
 			ID:      fmt.Sprintf("grpc-%d", i+1),
 			Address: addr,
 		})
 		if err != nil {
+			_ = locator.Close()
 			return nil, fmt.Errorf("failed to create node for %s: %w", addr, err)
 		}
 		if err := locator.AddNode(node); err != nil {
+			_ = node.Close()
+			_ = locator.Close()
 			return nil, fmt.Errorf("failed to add node for %s: %w", addr, err)
 		}
 	}
+	if healthChecker == nil {
+		healthChecker = gyro.NewDefaultHealthChecker(config.HealthChecker)
+	}
+	healthAwarePool := gyro.NewHealthAwarePoolWithChecker(locator, healthChecker)
+	healthCtx, cancel := context.WithCancel(context.Background())
+	healthAwarePool.StartHealthMonitoring(healthCtx)
 
 	return &GRPCClient{
-		locator: locator,
+		locator: healthAwarePool,
 		config:  config,
+		cancel:  cancel,
 	}, nil
 }
 
@@ -281,6 +305,9 @@ func (gc *GRPCClient) GetAllClients() map[string]any {
 
 // Close closes all connections and releases resources.
 func (gc *GRPCClient) Close() error {
+	if gc.cancel != nil {
+		gc.cancel()
+	}
 	return gc.locator.Close()
 }
 
@@ -290,13 +317,15 @@ func NewGRPCCluster(addresses []string) (*GRPCClient, error) {
 
 // GRPCNodeFactory creates gRPC nodes.
 type GRPCNodeFactory struct {
-	config *GRPCClientConfig
+	config        *GRPCClientConfig
+	newConnection func(address string, config gyro.ConnectionConfig) (GRPCConnection, error)
 }
 
 // NewGRPCNodeFactory creates a new gRPC node factory.
 func NewGRPCNodeFactory() *GRPCNodeFactory {
 	return &GRPCNodeFactory{
-		config: DefaultGRPCClientConfig(),
+		config:        DefaultGRPCClientConfig(),
+		newConnection: NewGRPCConnection,
 	}
 }
 
@@ -310,12 +339,16 @@ func (f *GRPCNodeFactory) WithConnectionConfig(connectionConfig gyro.ConnectionC
 
 	configCopy := *f.config
 	configCopy.Connection = connectionConfig
-	return &GRPCNodeFactory{config: &configCopy}, nil
+	return &GRPCNodeFactory{config: &configCopy, newConnection: f.newConnection}, nil
 }
 
 // CreateNode creates a new gRPC node from NodeInfo.
 func (f *GRPCNodeFactory) CreateNode(info gyro.NodeInfo) (gyro.Node, error) {
-	conn, err := NewGRPCConnection(info.Address, f.config.Connection)
+	newConnection := f.newConnection
+	if newConnection == nil {
+		newConnection = NewGRPCConnection
+	}
+	conn, err := newConnection(info.Address, f.config.Connection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC connection to %s: %w", info.Address, err)
 	}

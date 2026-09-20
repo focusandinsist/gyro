@@ -31,7 +31,9 @@ type HealthCheckerConfig struct {
 	RecoveryThreshold int           `json:"recovery_threshold"`
 }
 
-func validateHealthCheckerConfig(config HealthCheckerConfig) error {
+// ValidateHealthCheckerConfig validates values that are required by the
+// monitoring runtime before it starts background workers.
+func ValidateHealthCheckerConfig(config HealthCheckerConfig) error {
 	if config.Interval <= 0 {
 		return fmt.Errorf("health checker interval must be positive")
 	}
@@ -190,7 +192,7 @@ func (hc *DefaultHealthChecker) StopMonitoring() {
 
 // UpdateConfig updates the health checker configuration dynamically
 func (hc *DefaultHealthChecker) UpdateConfig(newConfig HealthCheckerConfig) error {
-	if err := validateHealthCheckerConfig(newConfig); err != nil {
+	if err := ValidateHealthCheckerConfig(newConfig); err != nil {
 		return err
 	}
 

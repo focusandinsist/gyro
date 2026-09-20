@@ -890,7 +890,7 @@ func (c *Client) connectionConfigEqual(old, new ConnectionConfig) bool {
 
 // updateHealthCheckerConfig updates the health checker configuration
 func (c *Client) updateHealthCheckerConfig(newConfig HealthCheckerConfig) error {
-	if err := validateHealthCheckerConfig(newConfig); err != nil {
+	if err := ValidateHealthCheckerConfig(newConfig); err != nil {
 		return fmt.Errorf("invalid health checker config: %w", err)
 	}
 
