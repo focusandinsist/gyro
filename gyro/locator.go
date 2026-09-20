@@ -22,7 +22,9 @@ type Locator interface {
 	Get(ctx context.Context, key string) (Node, error)
 	GetReplicas(ctx context.Context, key string, count int) ([]Node, error)
 	AddNode(node Node) error
+	AddNodeContext(ctx context.Context, node Node) error
 	RemoveNode(nodeID string) error
+	RemoveNodeContext(ctx context.Context, nodeID string) error
 	GetAllNodes() []Node
 	Close() error
 }
@@ -170,6 +172,15 @@ func (cl *ConsistentLocator) GetReplicas(ctx context.Context, key string, count 
 
 // AddNode adds a new node to the locator.
 func (cl *ConsistentLocator) AddNode(node Node) error {
+	return cl.AddNodeContext(context.Background(), node)
+}
+
+// AddNodeContext adds a node while honoring the caller's cancellation and
+// deadline during ring rebalancing.
+func (cl *ConsistentLocator) AddNodeContext(ctx context.Context, node Node) error {
+	if ctx == nil {
+		return fmt.Errorf("context cannot be nil")
+	}
 	if node == nil {
 		return fmt.Errorf("node cannot be nil")
 	}
@@ -186,7 +197,7 @@ func (cl *ConsistentLocator) AddNode(node Node) error {
 		return fmt.Errorf("node %s already exists in locator", nodeID)
 	}
 
-	if err := cl.ring.Add(context.Background(), nodeID); err != nil {
+	if err := cl.ring.Add(ctx, nodeID); err != nil {
 		return fmt.Errorf("failed to add node %s to consistent hash ring: %w", nodeID, err)
 	}
 
@@ -197,6 +208,15 @@ func (cl *ConsistentLocator) AddNode(node Node) error {
 
 // RemoveNode removes a node from the locator.
 func (cl *ConsistentLocator) RemoveNode(nodeID string) error {
+	return cl.RemoveNodeContext(context.Background(), nodeID)
+}
+
+// RemoveNodeContext removes a node while honoring the caller's cancellation
+// and deadline during ring rebalancing.
+func (cl *ConsistentLocator) RemoveNodeContext(ctx context.Context, nodeID string) error {
+	if ctx == nil {
+		return fmt.Errorf("context cannot be nil")
+	}
 	if nodeID == "" {
 		return fmt.Errorf("node ID cannot be empty")
 	}
@@ -207,7 +227,7 @@ func (cl *ConsistentLocator) RemoveNode(nodeID string) error {
 		cl.mu.Unlock()
 		return fmt.Errorf("node %s not found in locator", nodeID)
 	}
-	if err := cl.ring.Remove(context.Background(), nodeID); err != nil {
+	if err := cl.ring.Remove(ctx, nodeID); err != nil {
 		cl.mu.Unlock()
 		return fmt.Errorf("failed to remove node %s from consistent hash ring: %w", nodeID, err)
 	}

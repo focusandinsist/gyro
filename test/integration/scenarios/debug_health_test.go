@@ -119,13 +119,13 @@ func TestDebugHealthChecker(t *testing.T) {
 	t.Logf("=== Testing routing for key '%s' ===", testKey)
 
 	for i := 0; i < 3; i++ {
-		nodeClient, err := client.GetClientForKey(ctx, testKey)
+		_, err := client.GetClientForKey(ctx, testKey)
 		if err != nil {
 			t.Errorf("Failed to get client for key %s (attempt %d): %v", testKey, i+1, err)
 			continue
 		}
 
-		currentNode := getNodeAddressFromClient(nodeClient)
+		currentNode := getNodeAddressForKey(t, client, ctx, testKey)
 		t.Logf("Attempt %d: Key '%s' routed to node '%s'", i+1, testKey, currentNode)
 
 		time.Sleep(500 * time.Millisecond)

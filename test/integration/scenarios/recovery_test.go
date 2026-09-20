@@ -69,8 +69,9 @@ func testGRPCRecovery(t *testing.T, cluster *testbed.TestCluster) {
 		t.Fatalf("Failed to start Gyro client: %v", err)
 	}
 
-	// Wait for initial health checks
-	time.Sleep(1 * time.Second)
+	if _, err := client.GetClientForKey(ctx, "health-ready"); err != nil {
+		t.Fatalf("initial health check did not make a node available: %v", err)
+	}
 
 	// Variables to store test state
 	var testKey string
@@ -82,12 +83,12 @@ func testGRPCRecovery(t *testing.T, cluster *testbed.TestCluster) {
 		testKey = "recovery-test-123"
 
 		// Get initial routing for the test key
-		nodeClient, err := client.GetClientForKey(ctx, testKey)
+		_, err := client.GetClientForKey(ctx, testKey)
 		if err != nil {
 			t.Fatalf("Failed to get client for key %s: %v", testKey, err)
 		}
 
-		originalNode = getNodeAddressFromClient(nodeClient)
+		originalNode = getNodeAddressForKey(t, client, ctx, testKey)
 		t.Logf("Key '%s' initially routed to node '%s'", testKey, originalNode)
 
 		// Verify the node is healthy
@@ -115,17 +116,13 @@ func testGRPCRecovery(t *testing.T, cluster *testbed.TestCluster) {
 		}
 
 		// Wait for health checker to detect the failure
-		waitTime := time.Duration(config.HealthChecker.FailureThreshold) * config.HealthChecker.Interval * 2
-		t.Logf("Waiting %v for health checker to detect failure", waitTime)
-		time.Sleep(waitTime)
-
 		// Verify that requests are now routed to a different healthy node
-		nodeClient, err := client.GetClientForKey(ctx, testKey)
+		_, err := client.GetClientForKey(ctx, testKey)
 		if err != nil {
 			t.Fatalf("Failed to get client for key %s after node failure: %v", testKey, err)
 		}
 
-		failoverNode = getNodeAddressFromClient(nodeClient)
+		failoverNode = waitForRoutedNode(t, client, ctx, testKey, originalNode, true)
 		t.Logf("Key '%s' now routed to failover node '%s'", testKey, failoverNode)
 
 		// Verify failover occurred
@@ -159,19 +156,8 @@ func testGRPCRecovery(t *testing.T, cluster *testbed.TestCluster) {
 		}
 
 		// Wait for health checker to detect the recovery
-		waitTime := time.Duration(config.HealthChecker.RecoveryThreshold) * config.HealthChecker.Interval * 2
-		t.Logf("Waiting %v for health checker to detect recovery", waitTime)
-		time.Sleep(waitTime)
-
 		// Verify that the original node is now healthy
-		stats, err := cluster.GetServerStats("grpc", originalPort)
-		if err != nil {
-			t.Fatalf("Failed to get stats for recovered node: %v", err)
-		}
-
-		if !stats["healthy"].(bool) {
-			t.Errorf("Recovered node %s should be healthy but reports as unhealthy", originalNode)
-		}
+		waitForServerHealth(t, cluster, "grpc", originalPort, true)
 
 		t.Logf("Confirmed: original node %s has recovered and is healthy", originalNode)
 	})
@@ -182,12 +168,12 @@ func testGRPCRecovery(t *testing.T, cluster *testbed.TestCluster) {
 		}
 
 		// After recovery, verify that requests return to the original node (sticky routing)
-		nodeClient, err := client.GetClientForKey(ctx, testKey)
+		_, err := client.GetClientForKey(ctx, testKey)
 		if err != nil {
 			t.Fatalf("Failed to get client for key %s after recovery: %v", testKey, err)
 		}
 
-		currentNode := getNodeAddressFromClient(nodeClient)
+		currentNode := getNodeAddressForKey(t, client, ctx, testKey)
 		t.Logf("Key '%s' now routed to node '%s' after recovery", testKey, currentNode)
 
 		// Verify sticky routing: should return to original node
@@ -205,12 +191,12 @@ func testGRPCRecovery(t *testing.T, cluster *testbed.TestCluster) {
 
 		// Verify that multiple requests for the same key consistently go to the original node
 		for i := 0; i < 5; i++ {
-			nodeClient, err := client.GetClientForKey(ctx, testKey)
+			_, err := client.GetClientForKey(ctx, testKey)
 			if err != nil {
 				t.Fatalf("Failed to get client for key %s (attempt %d): %v", testKey, i+1, err)
 			}
 
-			currentNode := getNodeAddressFromClient(nodeClient)
+			currentNode := getNodeAddressForKey(t, client, ctx, testKey)
 			if currentNode != originalNode {
 				t.Errorf("Inconsistent recovery routing: expected %s, got %s (attempt %d)",
 					originalNode, currentNode, i+1)
@@ -222,10 +208,6 @@ func testGRPCRecovery(t *testing.T, cluster *testbed.TestCluster) {
 }
 
 func testRedisRecovery(t *testing.T, cluster *testbed.TestCluster) {
-	// Similar implementation for Redis recovery testing
-	// For now, we'll implement a basic test
-	t.Logf("Redis recovery test - basic implementation")
-
-	// TODO: Implement Redis-specific recovery testing
-	// This would follow the same pattern as gRPC but with Redis-specific setup
+	t.Log("Redis recovery uses the adapter routing contract until a protocol-level topology control is available")
+	testRedisFailover(t, cluster)
 }

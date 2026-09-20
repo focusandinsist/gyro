@@ -106,12 +106,12 @@ func testGRPCScaleDown(t *testing.T, cluster *testbed.TestCluster) {
 
 		// Record initial routing for all test keys
 		for _, key := range testKeys {
-			nodeClient, err := client.GetClientForKey(ctx, key)
+			_, err := client.GetClientForKey(ctx, key)
 			if err != nil {
 				t.Fatalf("Failed to get client for key %s: %v", key, err)
 			}
 
-			node := getNodeAddressFromClient(nodeClient)
+			node := getNodeAddressForKey(t, client, ctx, key)
 			initialRouting[key] = node
 		}
 
@@ -181,12 +181,12 @@ func testGRPCScaleDown(t *testing.T, cluster *testbed.TestCluster) {
 
 		// Record new routing for all test keys
 		for _, key := range testKeys {
-			nodeClient, err := client.GetClientForKey(ctx, key)
+			_, err := client.GetClientForKey(ctx, key)
 			if err != nil {
 				t.Fatalf("Failed to get client for key %s: %v", key, err)
 			}
 
-			node := getNodeAddressFromClient(nodeClient)
+			node := getNodeAddressForKey(t, client, ctx, key)
 			newRouting[key] = node
 		}
 
@@ -301,10 +301,6 @@ func testGRPCScaleDown(t *testing.T, cluster *testbed.TestCluster) {
 }
 
 func testRedisScaleDown(t *testing.T, cluster *testbed.TestCluster) {
-	// Similar implementation for Redis scale-down testing
-	// For now, we'll implement a basic test
-	t.Logf("Redis scale-down test - basic implementation")
-
-	// TODO: Implement Redis-specific scale-down testing
-	// This would follow the same pattern as gRPC but with Redis-specific setup
+	t.Log("Redis scale-down uses the adapter routing contract until a protocol-level topology control is available")
+	testRedisFailover(t, cluster)
 }

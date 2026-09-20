@@ -3,6 +3,8 @@ package gyro
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 )
@@ -124,5 +126,42 @@ func TestClientInitializationRollsBackCreatedNodes(t *testing.T) {
 	}
 	if factory.created[0].IsHealthy(context.Background()) {
 		t.Fatal("created node remained open after initialization rollback")
+	}
+}
+
+func TestClientSetLoggerPropagatesToActivePoolAndLocator(t *testing.T) {
+	discovery := NewStaticServiceDiscovery([]string{"node-a"})
+	client, err := NewClient("service", discovery, NewConfigManager(DefaultClientConfig()), NewMockNodeFactory(), NewDefaultHealthChecker(DefaultHealthCheckerConfig()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client.SetLogger(logger)
+	pool := client.GetLocator().(*HealthAwarePool)
+	if pool.log() != logger {
+		t.Fatal("logger was not propagated to the health-aware pool")
+	}
+	base := pool.currentLocator().(*ConsistentLocator)
+	if base.log() != logger {
+		t.Fatal("logger was not propagated to the underlying locator")
+	}
+}
+
+func TestClientHealthReportsActualLastCheckTime(t *testing.T) {
+	checker := NewDefaultHealthChecker(DefaultHealthCheckerConfig())
+	client := &Client{healthChecker: checker}
+	if got := client.Health().LastHealthCheck; !got.IsZero() {
+		t.Fatalf("LastHealthCheck before any probe = %v, want zero", got)
+	}
+	node := NewMockNode("node", "node")
+	checker.AddNode(node)
+	before := time.Now()
+	if err := checker.Check(context.Background(), node); err != nil {
+		t.Fatal(err)
+	}
+	got := client.Health().LastHealthCheck
+	if got.Before(before) || got.After(time.Now()) {
+		t.Fatalf("LastHealthCheck = %v, want actual probe time after %v", got, before)
 	}
 }

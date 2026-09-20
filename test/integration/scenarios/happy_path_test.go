@@ -105,7 +105,7 @@ func testGRPCHappyPath(t *testing.T, cluster *testbed.TestCluster) {
 		routingMap := make(map[string]string) // key -> node address
 
 		for _, key := range testKeys {
-			nodeClient, err := client.GetClientForKey(ctx, key)
+			_, err := client.GetClientForKey(ctx, key)
 			if err != nil {
 				t.Errorf("Failed to get client for key %s: %v", key, err)
 				continue
@@ -113,7 +113,7 @@ func testGRPCHappyPath(t *testing.T, cluster *testbed.TestCluster) {
 
 			// Get the node address (this would be implementation-specific)
 			// For now, we'll simulate this by checking which server received the request
-			nodeAddress := getNodeAddressFromClient(nodeClient)
+			nodeAddress := getNodeAddressForKey(t, client, ctx, key)
 			routingMap[key] = nodeAddress
 
 			t.Logf("Key '%s' routed to node '%s'", key, nodeAddress)
@@ -122,13 +122,13 @@ func testGRPCHappyPath(t *testing.T, cluster *testbed.TestCluster) {
 		// Verify routing consistency: same key should always go to same node
 		for i := 0; i < 3; i++ {
 			for _, key := range testKeys {
-				nodeClient, err := client.GetClientForKey(ctx, key)
+				_, err := client.GetClientForKey(ctx, key)
 				if err != nil {
 					t.Errorf("Failed to get client for key %s on iteration %d: %v", key, i, err)
 					continue
 				}
 
-				nodeAddress := getNodeAddressFromClient(nodeClient)
+				nodeAddress := getNodeAddressForKey(t, client, ctx, key)
 				expectedAddress := routingMap[key]
 
 				if nodeAddress != expectedAddress {
@@ -254,13 +254,45 @@ func testRedisHappyPath(t *testing.T, cluster *testbed.TestCluster) {
 
 // Helper functions
 
-func getNodeAddressFromClient(nodeClient any) string {
-	// The nodeClient is actually a Node interface
-	if node, ok := nodeClient.(gyro.Node); ok {
-		return node.Address()
+func getNodeAddressForKey(t *testing.T, client *gyro.Client, ctx context.Context, key string) string {
+	t.Helper()
+	node, err := client.GetNodeForKey(ctx, key)
+	if err != nil {
+		t.Fatalf("Failed to get routed node for key %s: %v", key, err)
 	}
-	// Fallback for unexpected types
-	return "unknown"
+	return node.Address()
+}
+
+func waitForRoutedNode(t *testing.T, client *gyro.Client, ctx context.Context, key, previous string, wantDifferent bool) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		node, err := client.GetNodeForKey(ctx, key)
+		if err == nil && (!wantDifferent || node.Address() != previous) {
+			return node.Address()
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	node, err := client.GetNodeForKey(ctx, key)
+	if err != nil {
+		t.Fatalf("timed out waiting for route for key %s: %v", key, err)
+	}
+	return node.Address()
+}
+
+func waitForServerHealth(t *testing.T, cluster *testbed.TestCluster, kind string, port int, healthy bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		stats, err := cluster.GetServerStats(kind, port)
+		if err == nil {
+			if value, ok := stats["healthy"].(bool); ok && value == healthy {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s server %d healthy=%v", kind, port, healthy)
 }
 
 func extractPortFromAddress(address string) int {

@@ -13,6 +13,18 @@ type removeFailingRing struct {
 	err error
 }
 
+type contextAwareRing struct {
+	hashRing
+}
+
+func (r *contextAwareRing) Add(ctx context.Context, _ string) error {
+	return ctx.Err()
+}
+
+func (r *contextAwareRing) Remove(ctx context.Context, _ string) error {
+	return ctx.Err()
+}
+
 func (r *removeFailingRing) Remove(context.Context, string) error {
 	return r.err
 }
@@ -325,6 +337,33 @@ func TestConsistentLocator_RemoveFailureKeepsNodeAndConnection(t *testing.T) {
 		if node.ID() != node1.ID() && node.ID() != node2.ID() {
 			t.Fatalf("Get returned unknown node %q", node.ID())
 		}
+	}
+}
+
+func TestConsistentLocator_NodeChangesPropagateContextCancellation(t *testing.T) {
+	locator, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseRing := locator.ring
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	locator.ring = &contextAwareRing{hashRing: baseRing}
+	if err := locator.AddNodeContext(canceledCtx, NewMockNode("new", "new")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AddNodeContext error = %v, want context.Canceled", err)
+	}
+
+	node := NewMockNode("existing", "existing")
+	locator.ring = baseRing
+	if err := locator.AddNode(node); err != nil {
+		t.Fatal(err)
+	}
+	locator.ring = &contextAwareRing{hashRing: baseRing}
+	if err := locator.RemoveNodeContext(canceledCtx, node.ID()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RemoveNodeContext error = %v, want context.Canceled", err)
+	}
+	if got := len(locator.GetAllNodes()); got != 1 {
+		t.Fatalf("canceled removal changed node count to %d", got)
 	}
 }
 

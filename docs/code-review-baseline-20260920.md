@@ -913,21 +913,17 @@ Go module identity 是依赖解析、源码 import 和版本发布的统一坐�
 20. **文档和集成测试被 `.gitignore` 忽略（已修复）**  
     已移除 `docs/` 和 `test/` 的忽略规则，只保留 `consistent/` 等生成物规则。干净 checkout 会包含 README 引用的文档和动态行为集成测试，后续 CI 可以直接发现并执行这些文件。
 
-21. **集成测试本身存在契约错误和未完成场景**  
-    位置：`test/integration/scenarios/happy_path_test.go:107-152`、`test/integration/scenarios/debug_health_test.go:117-132`。`Client.GetClientForKey` 返回原生 `*grpc.ClientConn`，但测试 helper 只接受 `gyro.Node`，因此地址始终是 `unknown`；集成测试中也有 Redis TODO 和依赖固定端口的逻辑。  
-    建议：通过 Node/地址查询 API 或测试专用观察接口验证路由，不要把 native client 反向断言为 Node；将场景拆成稳定的可重复测试。
+21. **集成测试本身存在契约错误和未完成场景（已修复）**
+    新增 `Client.GetNodeForKey` 以及 Redis/gRPC 适配器的同名节点观察 API。集成测试不再把 `GetClientForKey` 返回的 native client 反向断言为 `gyro.Node`，地址和路由一致性直接通过节点元数据验证；Redis 场景移除了 TODO，改为稳定 key 的重复路由契约测试。故障场景使用状态轮询替代固定 Sleep，剩余的 gRPC 健康故障转移行为仍属于已有 P1 健康路由问题。
 
-22. **上下文取消没有传递到节点增删**  
-    位置：`gyro/locator.go:20-27,172,197`。`Locator.AddNode/RemoveNode` 没有 context 参数，内部固定使用 `context.Background()`，一致性库的重平衡无法被调用方取消或设置 deadline。  
-    建议：把 context 纳入接口和实现；如果必须保持同步 API，则在文档中明确增删期间不可取消。
+22. **上下文取消没有传递到节点增删（已修复）**
+    `Locator` 新增 `AddNodeContext`/`RemoveNodeContext`，底层 ring 操作直接接收调用方 context；Client 的 service-watch 更新路径也把运行 context 传入。无 context 的方法仅作为显式使用 `context.Background()` 的便捷包装，新的可取消路径已覆盖回归测试。
 
-23. **SetLogger 的注释与实际行为不符**  
-    位置：`gyro/gyro.go:288-297,317-331`。`NewClient` 已经把当前 logger 注入内部 locator/pool，之后调用 `Client.SetLogger` 只更新 Client 自身指针，底层组件仍使用 discard logger。  
-    建议：SetLogger 同步传播到当前组件，并在 locator/pool 重建时复用最新 logger。
+23. **SetLogger 的注释与实际行为不符（已修复）**
+    `Client.SetLogger` 现在同步传播到当前 HealthAwarePool 和底层 locator；HealthAwarePool 替换 locator 时也会重新注入当前 logger。传入 nil 仍恢复 discard logger，后续重建资源不会退回旧 logger。
 
-24. **Health.LastHealthCheck 不是实际检查时间**  
-    位置：`gyro/gyro.go:440-450`。每次读取 Health 都填 `time.Now()`，即使从未运行过健康检查也会返回“刚刚检查过”。  
-    建议：记录 watcher/health checker 的真实最近检查时间；没有检查时返回零值或明确状态。
+24. **Health.LastHealthCheck 不是实际检查时间（已修复）**
+    `DefaultHealthChecker` 暴露最近一次真实 probe 时间，`Client.Health` 使用该时间；尚未执行检查时返回零值，不再在读取 API 时伪造时间戳。
 
 ### P3：维护性改进
 
@@ -981,3 +977,16 @@ Go module identity 是依赖解析、源码 import 和版本发布的统一坐�
 - `go test ./gyro ./gyro/grpc ./gyro/redis`：通过。
 - 新增初始化失败回滚和 locator 并发关闭回归测试：通过。
 - `gofmt -w` 已应用于本轮 Go 修改文件；完整 `go test ./...` 仍受仓库既有集成场景和当前 Windows/构建环境约束，未将其失败误归因于本轮 P2 修复。
+
+#### P2-21 至 P2-24 修复摘要
+
+- P2-21：新增节点元数据路由查询 API，修正所有 integration scenario 的 native-client 断言；Redis 场景移除 TODO，故障等待改为可诊断的状态轮询。
+- P2-22：新增 `AddNodeContext`/`RemoveNodeContext` 并将 service-watch context 传入一致性 ring 的增删操作。
+- P2-23：logger 传播到当前 pool、locator 及后续替换 locator，并补充传播回归测试。
+- P2-24：Health 使用 health checker 的真实最近 probe 时间；无 probe 时返回零时间，并补充边界测试。
+
+- `go test ./gyro ./gyro/grpc ./gyro/redis`：通过。
+- `go test -run '^$' ./...`：所有包编译通过。
+- `go test ./test/integration/scenarios -run '^TestHappyPath$' -count=1`：通过。
+- `go test ./test/integration/scenarios -run 'TestFailoverScenario/Redis_Failover' -count=1`：通过。
+- `go vet ./...`：通过。

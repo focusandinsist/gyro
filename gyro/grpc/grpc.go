@@ -306,7 +306,7 @@ func newGRPCClient(addresses []string, config *GRPCClientConfig, factory *GRPCNo
 // GetClientForKey returns the native gRPC client for the given key.
 // Routes the key to the correct gRPC node and returns the native client for direct use.
 func (gc *GRPCClient) GetClientForKey(ctx context.Context, key string) (any, error) {
-	node, err := gc.locator.Get(ctx, key)
+	node, err := gc.GetNodeForKey(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("gyro: failed to get node for key '%s': %w", key, err)
 	}
@@ -322,6 +322,15 @@ func (gc *GRPCClient) GetClientForKey(ctx context.Context, key string) (any, err
 	}
 
 	return nativeClient, nil
+}
+
+// GetNodeForKey returns the routed node metadata for observability and tests.
+func (gc *GRPCClient) GetNodeForKey(ctx context.Context, key string) (gyro.Node, error) {
+	node, err := gc.locator.Get(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("gyro: failed to get node for key '%s': %w", key, err)
+	}
+	return node, nil
 }
 
 // GetClientsForReplicas returns native gRPC clients for replica nodes.

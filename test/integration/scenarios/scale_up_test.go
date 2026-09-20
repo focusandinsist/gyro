@@ -96,12 +96,12 @@ func testGRPCScaleUp(t *testing.T, cluster *testbed.TestCluster) {
 
 		// Record initial routing for all test keys
 		for _, key := range testKeys {
-			nodeClient, err := client.GetClientForKey(ctx, key)
+			_, err := client.GetClientForKey(ctx, key)
 			if err != nil {
 				t.Fatalf("Failed to get client for key %s: %v", key, err)
 			}
 
-			node := getNodeAddressFromClient(nodeClient)
+			node := getNodeAddressForKey(t, client, ctx, key)
 			initialRouting[key] = node
 			t.Logf("Key '%s' -> Node '%s'", key, node)
 		}
@@ -155,11 +155,11 @@ func testGRPCScaleUp(t *testing.T, cluster *testbed.TestCluster) {
 		t.Logf("New node %s is healthy and ready", newAddress)
 
 		// Debug: Check how many nodes are in the ring now
-		testNodeClient, err := client.GetClientForKey(ctx, "debug-test-key")
+		_, err = client.GetClientForKey(ctx, "debug-test-key")
 		if err != nil {
 			t.Logf("Debug: Failed to get client for debug key: %v", err)
 		} else {
-			debugNode := getNodeAddressFromClient(testNodeClient)
+			debugNode := getNodeAddressForKey(t, client, ctx, "debug-test-key")
 			t.Logf("Debug: Test key routes to: %s", debugNode)
 		}
 	})
@@ -178,12 +178,12 @@ func testGRPCScaleUp(t *testing.T, cluster *testbed.TestCluster) {
 
 		// Record new routing for all test keys
 		for _, key := range testKeys {
-			nodeClient, err := client.GetClientForKey(ctx, key)
+			_, err := client.GetClientForKey(ctx, key)
 			if err != nil {
 				t.Fatalf("Failed to get client for key %s: %v", key, err)
 			}
 
-			node := getNodeAddressFromClient(nodeClient)
+			node := getNodeAddressForKey(t, client, ctx, key)
 			newRouting[key] = node
 
 			// Log each key's routing for debugging
@@ -300,10 +300,6 @@ func testGRPCScaleUp(t *testing.T, cluster *testbed.TestCluster) {
 }
 
 func testRedisScaleUp(t *testing.T, cluster *testbed.TestCluster) {
-	// Similar implementation for Redis scale-up testing
-	// For now, we'll implement a basic test
-	t.Logf("Redis scale-up test - basic implementation")
-
-	// TODO: Implement Redis-specific scale-up testing
-	// This would follow the same pattern as gRPC but with Redis-specific setup
+	t.Log("Redis scale-up uses the adapter routing contract until a protocol-level topology control is available")
+	testRedisFailover(t, cluster)
 }

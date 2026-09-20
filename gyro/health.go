@@ -181,6 +181,20 @@ func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
 	return nil
 }
 
+// LastCheckTime returns the timestamp of the most recent health probe. A zero
+// value means no probe has run yet.
+func (hc *DefaultHealthChecker) LastCheckTime() time.Time {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	var latest time.Time
+	for _, stats := range hc.nodeStats {
+		if stats.LastCheckTime.After(latest) {
+			latest = stats.LastCheckTime
+		}
+	}
+	return latest
+}
+
 // AddNode adds a node to be monitored.
 func (hc *DefaultHealthChecker) AddNode(node Node) {
 	hc.mu.Lock()
@@ -461,6 +475,11 @@ func (hap *HealthAwarePool) SetLogger(logger *slog.Logger) {
 		logger = discardLogger
 	}
 	hap.logger.Store(logger)
+	if locator := hap.currentLocator(); locator != nil {
+		if setter, ok := locator.(interface{ SetLogger(*slog.Logger) }); ok {
+			setter.SetLogger(logger)
+		}
+	}
 }
 
 func (hap *HealthAwarePool) log() *slog.Logger {
@@ -603,7 +622,11 @@ func (hap *HealthAwarePool) processHealthEvent(event HealthEvent) {
 
 // AddNode adds a node to both the locator and health monitoring.
 func (hap *HealthAwarePool) AddNode(node Node) error {
-	if err := hap.currentLocator().AddNode(node); err != nil {
+	return hap.AddNodeContext(context.Background(), node)
+}
+
+func (hap *HealthAwarePool) AddNodeContext(ctx context.Context, node Node) error {
+	if err := hap.currentLocator().AddNodeContext(ctx, node); err != nil {
 		return err
 	}
 
@@ -618,7 +641,11 @@ func (hap *HealthAwarePool) AddNode(node Node) error {
 
 // RemoveNode removes a node from both the locator and health monitoring.
 func (hap *HealthAwarePool) RemoveNode(nodeID string) error {
-	if err := hap.currentLocator().RemoveNode(nodeID); err != nil {
+	return hap.RemoveNodeContext(context.Background(), nodeID)
+}
+
+func (hap *HealthAwarePool) RemoveNodeContext(ctx context.Context, nodeID string) error {
+	if err := hap.currentLocator().RemoveNodeContext(ctx, nodeID); err != nil {
 		return err
 	}
 
@@ -745,6 +772,9 @@ func (hap *HealthAwarePool) ReplaceLocator(newLocator Locator) error {
 	hap.locatorMu.Lock()
 	hap.Locator = newLocator
 	hap.locatorMu.Unlock()
+	if setter, ok := newLocator.(interface{ SetLogger(*slog.Logger) }); ok {
+		setter.SetLogger(hap.log())
+	}
 
 	hap.mu.Lock()
 	hap.healthyNodes = newHealthyNodes

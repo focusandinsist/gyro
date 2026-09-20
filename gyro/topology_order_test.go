@@ -34,10 +34,18 @@ func (l *operationRecordingLocator) AddNode(node Node) error {
 	return nil
 }
 
+func (l *operationRecordingLocator) AddNodeContext(_ context.Context, node Node) error {
+	return l.AddNode(node)
+}
+
 func (l *operationRecordingLocator) RemoveNode(nodeID string) error {
 	l.operations = append(l.operations, "remove:"+nodeID)
 	delete(l.nodes, nodeID)
 	return nil
+}
+
+func (l *operationRecordingLocator) RemoveNodeContext(_ context.Context, nodeID string) error {
+	return l.RemoveNode(nodeID)
 }
 
 func (l *operationRecordingLocator) GetAllNodes() []Node {
@@ -72,7 +80,7 @@ func TestClientAppliesTopologyChangesInNodeIDOrder(t *testing.T) {
 			healthChecker: &controllableHealthChecker{config: DefaultHealthCheckerConfig()},
 		}
 		client.logger.Store(discardLogger)
-		client.handleServiceNodesChange([]NodeInfo{
+		client.handleServiceNodesChange(context.Background(), []NodeInfo{
 			{ID: "node-e", Address: "new-e"},
 			{ID: "node-c", Address: "new-c"},
 			{ID: "node-a", Address: "new-a"},
@@ -115,7 +123,7 @@ func TestClientAddressReorderDoesNotRecreateNodes(t *testing.T) {
 	client.mu.Lock()
 	client.running = true
 	client.mu.Unlock()
-	client.handleServiceNodesChange(reordered)
+	client.handleServiceNodesChange(context.Background(), reordered)
 	client.mu.Lock()
 	client.running = false
 	client.mu.Unlock()

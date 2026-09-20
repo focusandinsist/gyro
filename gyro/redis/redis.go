@@ -209,7 +209,7 @@ func newRedisClient(addresses []string, config *RedisClientConfig, factory *Redi
 }
 
 func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (any, error) {
-	node, err := rc.locator.Get(ctx, key)
+	node, err := rc.GetNodeForKey(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node for key '%s': %w", key, err)
 	}
@@ -225,6 +225,15 @@ func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (any, er
 	}
 
 	return nativeClient, nil
+}
+
+// GetNodeForKey returns the routed node metadata for observability and tests.
+func (rc *RedisClient) GetNodeForKey(ctx context.Context, key string) (gyro.Node, error) {
+	node, err := rc.locator.Get(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("gyro: failed to get node for key '%s': %w", key, err)
+	}
+	return node, nil
 }
 
 func (rc *RedisClient) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]any, error) {

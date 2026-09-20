@@ -271,6 +271,7 @@ type Client struct {
 	serviceDiscoveryHealthy   bool
 	lastServiceDiscoveryError string
 	serviceDiscoveryRetries   int
+	lastHealthCheck           time.Time
 }
 
 // NodeFactory creates nodes from NodeInfo.
@@ -334,6 +335,12 @@ func (c *Client) SetLogger(logger *slog.Logger) {
 		logger = discardLogger
 	}
 	c.logger.Store(logger)
+	c.mu.RLock()
+	locator := c.locator
+	c.mu.RUnlock()
+	if setter, ok := locator.(interface{ SetLogger(*slog.Logger) }); ok {
+		setter.SetLogger(logger)
+	}
 }
 
 func (c *Client) log() *slog.Logger {
@@ -547,6 +554,7 @@ func (c *Client) Close() error {
 
 // Health returns the current health status of the client
 func (c *Client) Health() *ClientHealth {
+	lastHealthCheck := c.lastHealthCheckTime()
 	c.healthMu.RLock()
 	defer c.healthMu.RUnlock()
 
@@ -554,8 +562,29 @@ func (c *Client) Health() *ClientHealth {
 		ServiceDiscoveryHealthy:   c.serviceDiscoveryHealthy,
 		LastServiceDiscoveryError: c.lastServiceDiscoveryError,
 		ServiceDiscoveryRetries:   c.serviceDiscoveryRetries,
-		LastHealthCheck:           time.Now(),
+		LastHealthCheck:           lastHealthCheck,
 	}
+}
+
+func (c *Client) lastHealthCheckTime() time.Time {
+	c.mu.RLock()
+	checker := c.healthChecker
+	c.mu.RUnlock()
+	if provider, ok := checker.(interface{ LastCheckTime() time.Time }); ok {
+		return provider.LastCheckTime()
+	}
+	return time.Time{}
+}
+
+// GetNodeForKey returns the routed node metadata without exposing a native
+// protocol client. It is useful for observability and routing assertions.
+func (c *Client) GetNodeForKey(ctx context.Context, key string) (Node, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.locator == nil {
+		return nil, fmt.Errorf("client not started")
+	}
+	return c.locator.Get(ctx, key)
 }
 
 // IsHealthy returns true if the client is healthy
@@ -655,13 +684,13 @@ func (c *Client) processServiceWatch(ctx context.Context, nodesCh <-chan []NodeI
 			if !ok {
 				return true // channel closed, caller should retry
 			}
-			c.handleServiceNodesChange(nodes)
+			c.handleServiceNodesChange(ctx, nodes)
 		}
 	}
 }
 
 // handleServiceNodesChange handles changes in service nodes with incremental updates.
-func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
+func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []NodeInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.nodeInfos == nil {
@@ -723,7 +752,7 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 	}
 
 	for _, nodeID := range nodesToRemove {
-		if err := locator.RemoveNode(nodeID); err != nil {
+		if err := locator.RemoveNodeContext(ctx, nodeID); err != nil {
 			c.log().Error("failed to remove node", "node_id", nodeID, "error", err)
 		} else {
 			delete(c.nodeInfos, nodeID)
@@ -741,7 +770,7 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 			continue
 		}
 
-		if err := locator.AddNode(node); err != nil {
+		if err := locator.AddNodeContext(ctx, node); err != nil {
 			c.log().Error("failed to add node", "node_id", nodeInfo.ID, "error", err)
 		} else {
 			c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
@@ -753,7 +782,7 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 	}
 
 	for _, nodeInfo := range nodesToUpdate {
-		if err := locator.RemoveNode(nodeInfo.ID); err != nil {
+		if err := locator.RemoveNodeContext(ctx, nodeInfo.ID); err != nil {
 			c.log().Error("failed to remove node for update", "node_id", nodeInfo.ID, "error", err)
 			continue
 		}
@@ -767,7 +796,7 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 			continue
 		}
 
-		if err := locator.AddNode(node); err != nil {
+		if err := locator.AddNodeContext(ctx, node); err != nil {
 			c.log().Error("failed to add updated node", "node_id", nodeInfo.ID, "error", err)
 		} else {
 			c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
