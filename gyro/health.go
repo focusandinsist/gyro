@@ -67,6 +67,7 @@ type DefaultHealthChecker struct {
 	mu               sync.RWMutex
 	config           HealthCheckerConfig
 	nodes            map[string]Node
+	nodeGenerations  map[string]uint64
 	nodeStats        map[string]*NodeHealthStats
 	healthListeners  []HealthListener
 	notificationTail chan struct{}
@@ -97,6 +98,7 @@ func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
 	return &DefaultHealthChecker{
 		config:          config,
 		nodes:           make(map[string]Node),
+		nodeGenerations: make(map[string]uint64),
 		nodeStats:       make(map[string]*NodeHealthStats),
 		healthListeners: make([]HealthListener, 0),
 		maxWorkers:      10,
@@ -105,9 +107,10 @@ func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
 
 // Check performs a health check on the given node.
 func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
-	hc.mu.Lock()
-
 	nodeID := node.ID()
+	hc.mu.Lock()
+	generation := hc.nodeGenerations[nodeID]
+	config := hc.config
 	stats, exists := hc.nodeStats[nodeID]
 	if !exists {
 		stats = &NodeHealthStats{IsHealthy: true} // optimistic until proven otherwise
@@ -116,11 +119,22 @@ func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
 
 	stats.TotalChecks++
 	stats.LastCheckTime = time.Now()
+	hc.mu.Unlock()
 
-	checkCtx, cancel := context.WithTimeout(ctx, hc.config.Timeout)
+	checkCtx, cancel := context.WithTimeout(ctx, config.Timeout)
 	defer cancel()
 
 	healthy := node.IsHealthy(checkCtx)
+	hc.mu.Lock()
+	if hc.nodeGenerations[nodeID] != generation {
+		hc.mu.Unlock()
+		return nil
+	}
+	stats = hc.nodeStats[nodeID]
+	if stats == nil {
+		hc.mu.Unlock()
+		return nil
+	}
 	var listeners []HealthListener
 	var previousNotification <-chan struct{}
 	var notificationDone chan struct{}
@@ -174,6 +188,7 @@ func (hc *DefaultHealthChecker) AddNode(node Node) {
 
 	nodeID := node.ID()
 	hc.nodes[nodeID] = node
+	hc.nodeGenerations[nodeID]++
 
 	if _, exists := hc.nodeStats[nodeID]; !exists {
 		hc.nodeStats[nodeID] = &NodeHealthStats{
@@ -190,6 +205,7 @@ func (hc *DefaultHealthChecker) RemoveNode(nodeID string) {
 
 	delete(hc.nodes, nodeID)
 	delete(hc.nodeStats, nodeID)
+	hc.nodeGenerations[nodeID]++
 }
 
 // StartMonitoring starts continuous health monitoring.

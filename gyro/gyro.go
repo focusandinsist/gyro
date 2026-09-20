@@ -263,6 +263,7 @@ type Client struct {
 	runCancel     context.CancelFunc
 	configWatcher bool
 	nodeFactory   NodeFactory
+	nodeInfos     map[string]NodeInfo
 	logger        atomic.Pointer[slog.Logger]
 
 	// Health tracking
@@ -310,6 +311,7 @@ func NewClient(serviceName string, discovery ServiceDiscovery, configManager *Co
 		configManager: configManager,
 		nodeFactory:   nodeFactory,
 		healthChecker: healthChecker,
+		nodeInfos:     make(map[string]NodeInfo),
 
 		// False until watchServiceNodes establishes its first watch.
 		serviceDiscoveryHealthy: false,
@@ -370,7 +372,12 @@ func (c *Client) buildLocatorUnsafe(config *ClientConfig, nodeFactory NodeFactor
 			return nil, fmt.Errorf("failed to add node %s to locator: %w", nodeInfo.ID, err)
 		}
 	}
-
+	if c.locator == nil {
+		c.nodeInfos = make(map[string]NodeInfo)
+		for _, nodeInfo := range nodeInfos {
+			c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
+		}
+	}
 	return baseLocator, nil
 }
 
@@ -416,10 +423,20 @@ func (c *Client) nodeNeedsUpdate(currentNode Node, newNodeInfo NodeInfo) bool {
 	if currentNode.Address() != newNodeInfo.Address {
 		return true
 	}
+	oldNodeInfo, exists := c.nodeInfos[newNodeInfo.ID]
+	return !exists || oldNodeInfo.Weight != newNodeInfo.Weight || !stringMapEqual(oldNodeInfo.Metadata, newNodeInfo.Metadata)
+}
 
-	// TODO: metadata changes, weight changes, other config changes.
-
-	return false
+func stringMapEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // Start starts the client with service discovery and config watching.
@@ -642,6 +659,9 @@ func (c *Client) processServiceWatch(ctx context.Context, nodesCh <-chan []NodeI
 func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.nodeInfos == nil {
+		c.nodeInfos = make(map[string]NodeInfo)
+	}
 
 	if !c.running {
 		return
@@ -701,6 +721,7 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 		if err := locator.RemoveNode(nodeID); err != nil {
 			c.log().Error("failed to remove node", "node_id", nodeID, "error", err)
 		} else {
+			delete(c.nodeInfos, nodeID)
 			if c.healthChecker != nil {
 				c.healthChecker.RemoveNode(nodeID)
 			}
@@ -718,6 +739,7 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 		if err := locator.AddNode(node); err != nil {
 			c.log().Error("failed to add node", "node_id", nodeInfo.ID, "error", err)
 		} else {
+			c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
 			if c.healthChecker != nil {
 				c.healthChecker.AddNode(node)
 			}
@@ -743,6 +765,7 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 		if err := locator.AddNode(node); err != nil {
 			c.log().Error("failed to add updated node", "node_id", nodeInfo.ID, "error", err)
 		} else {
+			c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
 			if c.healthChecker != nil {
 				c.healthChecker.AddNode(node)
 			}

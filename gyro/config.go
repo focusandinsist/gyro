@@ -1,7 +1,6 @@
 package gyro
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -61,7 +60,7 @@ func NewConfigManager(config *ClientConfig) *ConfigManager {
 	}
 
 	return &ConfigManager{
-		config:   config,
+		config:   cloneClientConfig(config),
 		watchers: make([]ConfigWatcher, 0),
 	}
 }
@@ -71,11 +70,7 @@ func (cm *ConfigManager) GetConfig() *ClientConfig {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
-	// JSON round-trip as a cheap deep copy, so callers can't mutate our internal state.
-	configJSON, _ := json.Marshal(cm.config)
-	var configCopy ClientConfig
-	json.Unmarshal(configJSON, &configCopy)
-	return &configCopy
+	return cloneClientConfig(cm.config)
 }
 
 // UpdateConfig updates the configuration and notifies watchers.
@@ -84,28 +79,31 @@ func (cm *ConfigManager) UpdateConfig(newConfig *ClientConfig) error {
 		return fmt.Errorf("new config cannot be nil")
 	}
 
-	cm.mu.Lock()
-	oldConfig := cm.config
-	cm.config = newConfig
+	cm.mu.RLock()
+	oldConfig := cloneClientConfig(cm.config)
 	watchers := make([]ConfigWatcher, len(cm.watchers))
 	copy(watchers, cm.watchers)
-	cm.mu.Unlock()
+	cm.mu.RUnlock()
 
 	for _, watcher := range watchers {
-		if err := watcher(oldConfig, newConfig); err != nil {
-			// Restore the published snapshot when a watcher rejects the update.
-			// The watcher is responsible for making its own runtime transition
-			// atomic before returning the error.
-			cm.mu.Lock()
-			if cm.config == newConfig {
-				cm.config = oldConfig
-			}
-			cm.mu.Unlock()
+		if err := watcher(cloneClientConfig(oldConfig), cloneClientConfig(newConfig)); err != nil {
 			return fmt.Errorf("config watcher failed: %w", err)
 		}
 	}
 
+	cm.mu.Lock()
+	cm.config = cloneClientConfig(newConfig)
+	cm.mu.Unlock()
+
 	return nil
+}
+
+func cloneClientConfig(config *ClientConfig) *ClientConfig {
+	if config == nil {
+		return nil
+	}
+	copy := *config
+	return &copy
 }
 
 // AddConfigWatcher adds a configuration change watcher.
