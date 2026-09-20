@@ -337,6 +337,11 @@ type HealthAwarePool struct {
 	healthyNodes    map[string]bool
 	healthEventChan chan HealthEvent
 	mu              sync.RWMutex
+	closed          bool
+	closeOnce       sync.Once
+	closeErr        error
+	eventDoneCh     chan struct{}
+	processorWG     sync.WaitGroup
 	logger          atomic.Pointer[slog.Logger]
 }
 
@@ -353,6 +358,7 @@ func NewHealthAwarePoolWithChecker(locator Locator, healthChecker HealthChecker)
 		healthChecker:   healthChecker,
 		healthyNodes:    make(map[string]bool),
 		healthEventChan: make(chan HealthEvent, 100),
+		eventDoneCh:     make(chan struct{}),
 	}
 	hap.logger.Store(discardLogger)
 
@@ -420,7 +426,16 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 
 // StartHealthMonitoring starts health monitoring for all nodes in the locator.
 func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
+	hap.mu.Lock()
+	if hap.closed {
+		hap.mu.Unlock()
+		return
+	}
+	hap.processorWG.Add(1)
+	hap.mu.Unlock()
+
 	if !hap.healthChecker.IsEnabled() {
+		hap.processorWG.Done()
 		return
 	}
 
@@ -430,10 +445,16 @@ func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 
 	hap.healthChecker.AddHealthListener(func(nodeID string, healthy bool) {
 		hap.mu.Lock()
+		if hap.closed {
+			hap.mu.Unlock()
+			return
+		}
 		hap.healthyNodes[nodeID] = healthy
 		hap.mu.Unlock()
 
 		select {
+		case <-hap.eventDoneCh:
+			return
 		case hap.healthEventChan <- HealthEvent{NodeID: nodeID, Healthy: healthy, Timestamp: time.Now()}:
 		default:
 			hap.log().Warn("health event dropped, event channel full", "node_id", nodeID, "healthy", healthy)
@@ -441,7 +462,10 @@ func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 	})
 
 	hap.healthChecker.StartMonitoring(ctx)
-	go hap.startHealthEventProcessor(ctx)
+	go func() {
+		defer hap.processorWG.Done()
+		hap.startHealthEventProcessor(ctx)
+	}()
 }
 
 // startHealthEventProcessor processes health events and updates internal state
@@ -449,6 +473,8 @@ func (hap *HealthAwarePool) startHealthEventProcessor(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-hap.eventDoneCh:
 			return
 		case event := <-hap.healthEventChan:
 			hap.processHealthEvent(event)
@@ -576,9 +602,22 @@ func (hap *HealthAwarePool) GetStats() HealthAwarePoolStats {
 
 // Close closes the locator and stops health monitoring.
 func (hap *HealthAwarePool) Close() error {
-	hap.StopHealthMonitoring()
-	close(hap.healthEventChan)
-	return hap.Locator.Close()
+	hap.closeOnce.Do(func() {
+		hap.mu.Lock()
+		hap.closed = true
+		close(hap.eventDoneCh)
+		hap.mu.Unlock()
+
+		// The health checker invokes listeners asynchronously. Stop producing
+		// new events first, then wait for the event processor. The event data
+		// channel intentionally remains open because an in-flight listener may
+		// still hold a reference to it after Close returns.
+		hap.StopHealthMonitoring()
+		hap.processorWG.Wait()
+		hap.closeErr = hap.Locator.Close()
+	})
+
+	return hap.closeErr
 }
 
 // LoadBalancer provides load balancing strategies for node selection.

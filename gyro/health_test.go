@@ -2,9 +2,88 @@ package gyro
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
+
+type controllableHealthChecker struct {
+	mu       sync.Mutex
+	listener HealthListener
+	config   HealthCheckerConfig
+}
+
+func (c *controllableHealthChecker) Check(context.Context, Node) error { return nil }
+
+func (c *controllableHealthChecker) AddNode(Node) {}
+
+func (c *controllableHealthChecker) RemoveNode(string) {}
+
+func (c *controllableHealthChecker) StartMonitoring(context.Context) {}
+
+func (c *controllableHealthChecker) StopMonitoring() {}
+
+func (c *controllableHealthChecker) IsNodeHealthy(string) bool { return true }
+
+func (c *controllableHealthChecker) AddHealthListener(listener HealthListener) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.listener = listener
+}
+
+func (c *controllableHealthChecker) UpdateConfig(config HealthCheckerConfig) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.config = config
+	return nil
+}
+
+func (c *controllableHealthChecker) GetConfig() HealthCheckerConfig {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.config
+}
+
+func (c *controllableHealthChecker) IsEnabled() bool { return true }
+
+func (c *controllableHealthChecker) Emit(nodeID string, healthy bool) {
+	c.mu.Lock()
+	listener := c.listener
+	c.mu.Unlock()
+	if listener != nil {
+		listener(nodeID, healthy)
+	}
+}
+
+func TestHealthAwarePool_CloseStopsProcessorAndRejectsLateEvents(t *testing.T) {
+	locator, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatalf("failed to create locator: %v", err)
+	}
+
+	checker := &controllableHealthChecker{config: DefaultHealthCheckerConfig()}
+	pool := NewHealthAwarePoolWithChecker(locator, checker)
+	pool.StartHealthMonitoring(context.Background())
+
+	if err := pool.Close(); err != nil {
+		t.Fatalf("first close failed: %v", err)
+	}
+
+	select {
+	case <-pool.eventDoneCh:
+	default:
+		t.Fatal("pool close did not signal event processor shutdown")
+	}
+
+	// The checker may still deliver a callback after Close because its listener
+	// API is asynchronous. This must be ignored rather than sent to a closed
+	// channel or processed after the pool has been torn down.
+	checker.Emit("late-node", false)
+
+	if err := pool.Close(); err != nil {
+		t.Fatalf("second close failed: %v", err)
+	}
+}
 
 func TestDefaultHealthChecker_FailureThreshold(t *testing.T) {
 	config := HealthCheckerConfig{
