@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
 	"github.com/focusandinsist/gyro/gyro"
@@ -28,15 +29,28 @@ type GRPCConnection interface {
 type DefaultGRPCConnection struct {
 	address   string
 	conn      *grpc.ClientConn
+	config    gyro.ConnectionConfig
 	connected atomic.Bool
 }
 
-// NewGRPCConnection creates a new gRPC connection. grpc.NewClient does not
-// dial eagerly, so the connection is established lazily on first RPC / health
-// check. TLS is not configured here (insecure transport); if the backend
-// requires TLS, extend gyro.ConnectionConfig with credential options.
+// NewGRPCConnection creates a gRPC connection and applies the connection
+// timeouts to health-check dialing and RPC contexts. gRPC multiplexes streams over one
+// transport, so MaxActiveConns and MaxIdleConns do not map to a connection
+// pool and are intentionally not used.
 func NewGRPCConnection(address string, config gyro.ConnectionConfig) (GRPCConnection, error) {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if config.ConnectTimeout < 0 || config.ReadTimeout < 0 || config.WriteTimeout < 0 || config.IdleTimeout < 0 {
+		return nil, fmt.Errorf("gRPC connection timeouts cannot be negative")
+	}
+	options := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:    config.IdleTimeout,
+			Timeout: config.WriteTimeout,
+		}),
+		grpc.WithUnaryInterceptor(timeoutUnaryInterceptor(config)),
+		grpc.WithStreamInterceptor(timeoutStreamInterceptor(config)),
+	}
+	conn, err := grpc.NewClient(address, options...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create grpc client for %s: %w", address, err)
 	}
@@ -44,10 +58,56 @@ func NewGRPCConnection(address string, config gyro.ConnectionConfig) (GRPCConnec
 	c := &DefaultGRPCConnection{
 		address: address,
 		conn:    conn,
+		config:  config,
 	}
 	c.connected.Store(true) // optimistic; Ping() will correct this
 
 	return c, nil
+}
+
+func timeoutUnaryInterceptor(config gyro.ConnectionConfig) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, request, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, options ...grpc.CallOption) error {
+		timeout := config.ReadTimeout
+		if timeout <= 0 || (config.ConnectTimeout > 0 && config.ConnectTimeout < timeout) {
+			timeout = config.ConnectTimeout
+		}
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		return invoker(ctx, method, request, reply, cc, options...)
+	}
+}
+
+func timeoutStreamInterceptor(config gyro.ConnectionConfig) grpc.StreamClientInterceptor {
+	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, options ...grpc.CallOption) (grpc.ClientStream, error) {
+		timeout := config.ReadTimeout
+		if timeout <= 0 || (config.WriteTimeout > 0 && config.WriteTimeout < timeout) {
+			timeout = config.WriteTimeout
+		}
+		if timeout <= 0 {
+			return streamer(ctx, desc, cc, method, options...)
+		}
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		stream, err := streamer(ctx, desc, cc, method, options...)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		return &cancelingClientStream{ClientStream: stream, cancel: cancel}, nil
+	}
+}
+
+type cancelingClientStream struct {
+	grpc.ClientStream
+	cancel context.CancelFunc
+}
+
+func (s *cancelingClientStream) CloseSend() error {
+	err := s.ClientStream.CloseSend()
+	s.cancel()
+	return err
 }
 
 // Close closes the gRPC connection.
@@ -73,6 +133,11 @@ func (c *DefaultGRPCConnection) GetState() string {
 // falls back to the raw connectivity state so services that haven't wired up
 // health checking aren't unnecessarily marked unhealthy.
 func (c *DefaultGRPCConnection) Ping(ctx context.Context) error {
+	if c.config.ConnectTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.config.ConnectTimeout)
+		defer cancel()
+	}
 	client := healthpb.NewHealthClient(c.conn)
 	resp, err := client.Check(ctx, &healthpb.HealthCheckRequest{})
 	if err == nil {

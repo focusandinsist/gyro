@@ -129,6 +129,14 @@ func TestGRPCConvenienceClientRejectsInvalidHealthConfig(t *testing.T) {
 	}
 }
 
+func TestNewGRPCConnectionRejectsNegativeTimeouts(t *testing.T) {
+	config := gyro.DefaultConnectionConfig()
+	config.ConnectTimeout = -time.Second
+	if _, err := NewGRPCConnection("localhost:1", config); err == nil {
+		t.Fatal("expected negative connection timeout to be rejected")
+	}
+}
+
 func TestGRPCNodeDoesNotGateNativeClientOnSingleFailedProbe(t *testing.T) {
 	connection := newTestGRPCConnection("grpc.test")
 	node := NewGRPCNode("grpc-1", "grpc.test", connection)

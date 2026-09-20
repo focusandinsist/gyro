@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 type removeFailingRing struct {
@@ -324,5 +325,56 @@ func TestConsistentLocator_RemoveFailureKeepsNodeAndConnection(t *testing.T) {
 		if node.ID() != node1.ID() && node.ID() != node2.ID() {
 			t.Fatalf("Get returned unknown node %q", node.ID())
 		}
+	}
+}
+
+type blockingCloseNode struct {
+	id      string
+	started chan struct{}
+	release chan struct{}
+}
+
+func (n *blockingCloseNode) ID() string                     { return n.id }
+func (n *blockingCloseNode) Address() string                { return n.id }
+func (n *blockingCloseNode) IsHealthy(context.Context) bool { return true }
+func (n *blockingCloseNode) Close() error {
+	select {
+	case <-n.started:
+	default:
+		close(n.started)
+	}
+	<-n.release
+	return nil
+}
+
+func TestConsistentLocator_CloseDoesNotHoldLockDuringNodeClose(t *testing.T) {
+	locator, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := &blockingCloseNode{id: "node", started: make(chan struct{}), release: make(chan struct{})}
+	if err := locator.AddNode(node); err != nil {
+		t.Fatal(err)
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- locator.Close() }()
+	select {
+	case <-node.started:
+	case <-time.After(time.Second):
+		t.Fatal("node close did not start")
+	}
+	operationDone := make(chan error, 1)
+	go func() { operationDone <- locator.AddNode(NewMockNode("new", "new")) }()
+	select {
+	case err := <-operationDone:
+		if err != nil {
+			t.Fatalf("AddNode while Close was closing detached node failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("locator lock was held while node Close blocked")
+	}
+	close(node.release)
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close failed: %v", err)
 	}
 }

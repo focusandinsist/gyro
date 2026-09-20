@@ -96,3 +96,33 @@ func TestNodeNeedsUpdateIncludesMetadataAndWeight(t *testing.T) {
 		t.Fatal("unchanged node info requires an unnecessary update")
 	}
 }
+
+type rollbackNodeFactory struct {
+	created []*MockNode
+	failID  string
+}
+
+func (f *rollbackNodeFactory) CreateNode(info NodeInfo) (Node, error) {
+	if info.ID == f.failID {
+		return nil, errors.New("injected node creation failure")
+	}
+	node := NewMockNode(info.ID, info.Address)
+	f.created = append(f.created, node)
+	return node, nil
+}
+
+func TestClientInitializationRollsBackCreatedNodes(t *testing.T) {
+	discovery := NewStaticServiceDiscovery(nil)
+	discovery.SetNodes("service", []NodeInfo{{ID: "node-a", Address: "a"}, {ID: "node-b", Address: "b"}})
+	factory := &rollbackNodeFactory{failID: "node-b"}
+	_, err := NewClient("service", discovery, NewConfigManager(DefaultClientConfig()), factory, NewDefaultHealthChecker(DefaultHealthCheckerConfig()))
+	if err == nil {
+		t.Fatal("expected initialization to fail")
+	}
+	if len(factory.created) != 1 {
+		t.Fatalf("created nodes = %d, want 1", len(factory.created))
+	}
+	if factory.created[0].IsHealthy(context.Background()) {
+		t.Fatal("created node remained open after initialization rollback")
+	}
+}

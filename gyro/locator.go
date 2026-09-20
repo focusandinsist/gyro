@@ -2,6 +2,7 @@ package gyro
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -58,6 +59,22 @@ type ConsistentLocator struct {
 }
 
 func NewConsistentLocator(config LocatorConfig) (*ConsistentLocator, error) {
+	ring, err := newHashRing(config)
+	if err != nil {
+		return nil, err
+	}
+
+	cl := &ConsistentLocator{
+		nodes:  make(map[string]Node),
+		ring:   ring,
+		config: config,
+	}
+	cl.logger.Store(discardLogger)
+
+	return cl, nil
+}
+
+func newHashRing(config LocatorConfig) (hashRing, error) {
 	var hasher consistent.Hasher
 	switch config.HashFunction {
 	case "", "xxhash":
@@ -80,14 +97,7 @@ func NewConsistentLocator(config LocatorConfig) (*ConsistentLocator, error) {
 		return nil, fmt.Errorf("failed to create consistent hash ring: %w", err)
 	}
 
-	cl := &ConsistentLocator{
-		nodes:  make(map[string]Node),
-		ring:   ring,
-		config: config,
-	}
-	cl.logger.Store(discardLogger)
-
-	return cl, nil
+	return ring, nil
 }
 
 // SetLogger overrides the logger used for internal diagnostics. Passing nil
@@ -228,18 +238,24 @@ func (cl *ConsistentLocator) GetAllNodes() []Node {
 // Close closes all connections and releases resources.
 func (cl *ConsistentLocator) Close() error {
 	cl.mu.Lock()
-	defer cl.mu.Unlock()
+	nodes := cl.nodes
+	cl.nodes = make(map[string]Node)
+	newRing, err := newHashRing(cl.config)
+	if err != nil {
+		cl.mu.Unlock()
+		return fmt.Errorf("failed to reset closed locator ring: %w", err)
+	}
+	cl.ring = newRing
+	cl.mu.Unlock()
 
-	var lastErr error
-	for nodeID, node := range cl.nodes {
+	var closeErr error
+	for nodeID, node := range nodes {
 		if err := node.Close(); err != nil {
-			lastErr = fmt.Errorf("failed to close node %s: %w", nodeID, err)
+			closeErr = errors.Join(closeErr, fmt.Errorf("failed to close node %s: %w", nodeID, err))
 		}
 	}
 
-	cl.nodes = make(map[string]Node)
-
-	return lastErr
+	return closeErr
 }
 
 // GetStats returns statistics about the locator.

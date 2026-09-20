@@ -358,20 +358,25 @@ func (c *Client) buildLocatorUnsafe(config *ClientConfig, nodeFactory NodeFactor
 		return nil, fmt.Errorf("failed to create locator: %w", err)
 	}
 	baseLocator.SetLogger(c.log())
+	committed := false
+	defer func() {
+		if !committed {
+			_ = baseLocator.Close()
+		}
+	}()
 
 	for _, nodeInfo := range nodeInfos {
 		node, err := nodeFactory.CreateNode(nodeInfo)
 		if err != nil {
-			_ = baseLocator.Close()
 			return nil, fmt.Errorf("failed to create node %s: %w", nodeInfo.ID, err)
 		}
 
 		if err := baseLocator.AddNode(node); err != nil {
 			_ = node.Close()
-			_ = baseLocator.Close()
 			return nil, fmt.Errorf("failed to add node %s to locator: %w", nodeInfo.ID, err)
 		}
 	}
+	committed = true
 	if c.locator == nil {
 		c.nodeInfos = make(map[string]NodeInfo)
 		for _, nodeInfo := range nodeInfos {
