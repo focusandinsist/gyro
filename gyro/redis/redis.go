@@ -267,6 +267,19 @@ func NewRedisNodeFactory() *RedisNodeFactory {
 	}
 }
 
+// WithConnectionConfig returns an independent factory for a new connection
+// configuration. The current factory remains unchanged until a Client has
+// successfully built and published the replacement locator.
+func (f *RedisNodeFactory) WithConnectionConfig(connectionConfig gyro.ConnectionConfig) (gyro.NodeFactory, error) {
+	if f == nil || f.config == nil {
+		return nil, fmt.Errorf("Redis node factory is not initialized")
+	}
+
+	configCopy := *f.config
+	configCopy.Connection = connectionConfig
+	return &RedisNodeFactory{config: &configCopy}, nil
+}
+
 // CreateNode creates a new Redis node from NodeInfo.
 func (f *RedisNodeFactory) CreateNode(info gyro.NodeInfo) (gyro.Node, error) {
 	conn, err := NewRedisConnection(info.Address, f.config.Connection)

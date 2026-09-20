@@ -93,7 +93,14 @@ func (cm *ConfigManager) UpdateConfig(newConfig *ClientConfig) error {
 
 	for _, watcher := range watchers {
 		if err := watcher(oldConfig, newConfig); err != nil {
-			// TODO: a failing watcher aborts the rest; consider collecting all errors instead.
+			// Restore the published snapshot when a watcher rejects the update.
+			// The watcher is responsible for making its own runtime transition
+			// atomic before returning the error.
+			cm.mu.Lock()
+			if cm.config == newConfig {
+				cm.config = oldConfig
+			}
+			cm.mu.Unlock()
 			return fmt.Errorf("config watcher failed: %w", err)
 		}
 	}

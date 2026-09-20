@@ -2,6 +2,7 @@ package gyro
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,22 @@ type HealthCheckerConfig struct {
 	Timeout           time.Duration `json:"timeout"`
 	FailureThreshold  int           `json:"failure_threshold"`
 	RecoveryThreshold int           `json:"recovery_threshold"`
+}
+
+func validateHealthCheckerConfig(config HealthCheckerConfig) error {
+	if config.Interval <= 0 {
+		return fmt.Errorf("health checker interval must be positive")
+	}
+	if config.Timeout <= 0 {
+		return fmt.Errorf("health checker timeout must be positive")
+	}
+	if config.FailureThreshold <= 0 {
+		return fmt.Errorf("health checker failure threshold must be positive")
+	}
+	if config.RecoveryThreshold <= 0 {
+		return fmt.Errorf("health checker recovery threshold must be positive")
+	}
+	return nil
 }
 
 func DefaultHealthCheckerConfig() HealthCheckerConfig {
@@ -173,6 +190,10 @@ func (hc *DefaultHealthChecker) StopMonitoring() {
 
 // UpdateConfig updates the health checker configuration dynamically
 func (hc *DefaultHealthChecker) UpdateConfig(newConfig HealthCheckerConfig) error {
+	if err := validateHealthCheckerConfig(newConfig); err != nil {
+		return err
+	}
+
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
 
@@ -333,6 +354,7 @@ type HealthAwarePoolStats struct {
 // HealthAwarePool wraps a Locator with health checking capabilities.
 type HealthAwarePool struct {
 	Locator
+	locatorMu       sync.RWMutex
 	healthChecker   HealthChecker
 	healthyNodes    map[string]bool
 	healthEventChan chan HealthEvent
@@ -387,9 +409,26 @@ func (hap *HealthAwarePool) log() *slog.Logger {
 	return hap.logger.Load()
 }
 
+func (hap *HealthAwarePool) currentLocator() Locator {
+	hap.locatorMu.RLock()
+	defer hap.locatorMu.RUnlock()
+	return hap.Locator
+}
+
+// GetReplicas returns replicas from the currently active locator.
+func (hap *HealthAwarePool) GetReplicas(ctx context.Context, key string, count int) ([]Node, error) {
+	return hap.currentLocator().GetReplicas(ctx, key, count)
+}
+
+// GetAllNodes returns nodes from the currently active locator.
+func (hap *HealthAwarePool) GetAllNodes() []Node {
+	return hap.currentLocator().GetAllNodes()
+}
+
 // Get retrieves a healthy node for the given key.
 func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
-	node, err := hap.Locator.Get(ctx, key)
+	locator := hap.currentLocator()
+	node, err := locator.Get(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +442,7 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 		return node, nil
 	}
 
-	replicas, err := hap.Locator.GetReplicas(ctx, key, 3)
+	replicas, err := locator.GetReplicas(ctx, key, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +478,7 @@ func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 		return
 	}
 
-	for _, node := range hap.Locator.GetAllNodes() {
+	for _, node := range hap.GetAllNodes() {
 		hap.healthChecker.AddNode(node)
 	}
 
@@ -491,7 +530,7 @@ func (hap *HealthAwarePool) processHealthEvent(event HealthEvent) {
 
 // AddNode adds a node to both the locator and health monitoring.
 func (hap *HealthAwarePool) AddNode(node Node) error {
-	if err := hap.Locator.AddNode(node); err != nil {
+	if err := hap.currentLocator().AddNode(node); err != nil {
 		return err
 	}
 
@@ -506,7 +545,7 @@ func (hap *HealthAwarePool) AddNode(node Node) error {
 
 // RemoveNode removes a node from both the locator and health monitoring.
 func (hap *HealthAwarePool) RemoveNode(nodeID string) error {
-	if err := hap.Locator.RemoveNode(nodeID); err != nil {
+	if err := hap.currentLocator().RemoveNode(nodeID); err != nil {
 		return err
 	}
 
@@ -600,6 +639,62 @@ func (hap *HealthAwarePool) GetStats() HealthAwarePoolStats {
 	return stats
 }
 
+// ReplaceLocator atomically switches the pool to a fully built locator. The
+// existing health checker and event processor remain attached to the pool, so
+// health-based failover continues across the replacement. Nodes removed from
+// the topology are detached from the checker before the old locator closes.
+func (hap *HealthAwarePool) ReplaceLocator(newLocator Locator) error {
+	if newLocator == nil {
+		return fmt.Errorf("new locator cannot be nil")
+	}
+
+	hap.mu.RLock()
+	closed := hap.closed
+	hap.mu.RUnlock()
+	if closed {
+		return fmt.Errorf("health-aware pool is closed")
+	}
+
+	oldLocator := hap.currentLocator()
+	if oldLocator == newLocator {
+		return fmt.Errorf("new locator is already active")
+	}
+	oldNodes := oldLocator.GetAllNodes()
+	newNodes := newLocator.GetAllNodes()
+
+	newHealthyNodes := make(map[string]bool, len(newNodes))
+	newNodeIDs := make(map[string]struct{}, len(newNodes))
+	for _, node := range newNodes {
+		newHealthyNodes[node.ID()] = true
+		newNodeIDs[node.ID()] = struct{}{}
+	}
+
+	hap.locatorMu.Lock()
+	hap.Locator = newLocator
+	hap.locatorMu.Unlock()
+
+	hap.mu.Lock()
+	hap.healthyNodes = newHealthyNodes
+	hap.mu.Unlock()
+
+	for _, node := range oldNodes {
+		if _, stillPresent := newNodeIDs[node.ID()]; !stillPresent {
+			hap.healthChecker.RemoveNode(node.ID())
+		}
+	}
+	for _, node := range newNodes {
+		hap.healthChecker.AddNode(node)
+	}
+
+	if err := oldLocator.Close(); err != nil {
+		// The replacement has already been committed. Reporting an error here
+		// would make ConfigManager roll back its snapshot while the new locator
+		// is active, creating a configuration/runtime mismatch.
+		hap.log().Error("failed to close replaced locator", "error", err)
+	}
+	return nil
+}
+
 // Close closes the locator and stops health monitoring.
 func (hap *HealthAwarePool) Close() error {
 	hap.closeOnce.Do(func() {
@@ -614,7 +709,7 @@ func (hap *HealthAwarePool) Close() error {
 		// still hold a reference to it after Close returns.
 		hap.StopHealthMonitoring()
 		hap.processorWG.Wait()
-		hap.closeErr = hap.Locator.Close()
+		hap.closeErr = hap.currentLocator().Close()
 	})
 
 	return hap.closeErr

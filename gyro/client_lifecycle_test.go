@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func (m *MockServiceDiscovery) Register(_ context.Context, _ string, node NodeInfo) error {
@@ -157,4 +158,116 @@ func TestClientIgnoresConfigUpdatesWhileStopped(t *testing.T) {
 	if client.GetLocator() != nil {
 		t.Fatal("a stopped client must not recreate a locator from a config watcher")
 	}
+}
+
+func TestClientConfigReloadReplacesAndClosesOldLocator(t *testing.T) {
+	client, configManager, nodeFactory := newLifecycleTestClient(t)
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	oldPool := client.GetLocator()
+	oldNode := nodeFactory.GetMockNode("node-1")
+	if oldPool == nil || oldNode == nil {
+		t.Fatal("expected an initialized client locator and node")
+	}
+
+	newConfig := *configManager.GetConfig()
+	newConfig.Locator.PartitionCount++
+	if err := configManager.UpdateConfig(&newConfig); err != nil {
+		t.Fatalf("locator config update failed: %v", err)
+	}
+
+	if client.GetLocator() != oldPool {
+		t.Fatal("configuration reload should preserve the health-aware pool instance")
+	}
+	if oldNode.IsHealthy(context.Background()) {
+		t.Fatal("configuration reload did not close the old node connection")
+	}
+	if nodeFactory.GetMockNode("node-1") == oldNode {
+		t.Fatal("configuration reload reused the old node connection")
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+}
+
+func TestClientConfigReloadKeepsHealthMonitoringActive(t *testing.T) {
+	config := DefaultClientConfig()
+	config.HealthChecker = HealthCheckerConfig{
+		Enabled:           true,
+		Interval:          5 * time.Millisecond,
+		Timeout:           5 * time.Millisecond,
+		FailureThreshold:  1,
+		RecoveryThreshold: 1,
+	}
+	configManager := NewConfigManager(config)
+	discovery := NewMockServiceDiscovery([]NodeInfo{{ID: "node-1", Address: "127.0.0.1:6379"}})
+	nodeFactory := NewMockNodeFactory()
+	client, err := NewClient(
+		"config-reload-health-service",
+		discovery,
+		configManager,
+		nodeFactory,
+		NewDefaultHealthChecker(config.HealthChecker),
+	)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer client.Close()
+
+	oldNode := nodeFactory.GetMockNode("node-1")
+	waitForNodeChecks(t, oldNode, 1)
+
+	newConfig := *configManager.GetConfig()
+	newConfig.Locator.PartitionCount++
+	if err := configManager.UpdateConfig(&newConfig); err != nil {
+		t.Fatalf("locator config update failed: %v", err)
+	}
+
+	newNode := nodeFactory.GetMockNode("node-1")
+	if newNode == oldNode {
+		t.Fatal("configuration reload reused the old node connection")
+	}
+	waitForNodeChecks(t, newNode, 1)
+}
+
+func TestClientRejectsUnsupportedConnectionConfigReload(t *testing.T) {
+	client, configManager, nodeFactory := newLifecycleTestClient(t)
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer client.Close()
+
+	oldConfig := configManager.GetConfig()
+	oldNode := nodeFactory.GetMockNode("node-1")
+	newConfig := *oldConfig
+	newConfig.Connection.ConnectTimeout++
+	if err := configManager.UpdateConfig(&newConfig); err == nil {
+		t.Fatal("expected unsupported connection config reload to fail")
+	}
+
+	currentConfig := configManager.GetConfig()
+	if currentConfig.Connection != oldConfig.Connection {
+		t.Fatal("failed connection config update was not rolled back")
+	}
+	if !oldNode.IsHealthy(context.Background()) {
+		t.Fatal("failed connection config update closed the active node")
+	}
+}
+
+func waitForNodeChecks(t *testing.T, node *MockNode, minimum int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if node.GetCheckCallCount() >= minimum {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("node %s did not receive %d health checks", node.ID(), minimum)
 }

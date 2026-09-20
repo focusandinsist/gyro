@@ -300,6 +300,19 @@ func NewGRPCNodeFactory() *GRPCNodeFactory {
 	}
 }
 
+// WithConnectionConfig returns an independent factory for a new connection
+// configuration. The current factory remains unchanged until a Client has
+// successfully built and published the replacement locator.
+func (f *GRPCNodeFactory) WithConnectionConfig(connectionConfig gyro.ConnectionConfig) (gyro.NodeFactory, error) {
+	if f == nil || f.config == nil {
+		return nil, fmt.Errorf("gRPC node factory is not initialized")
+	}
+
+	configCopy := *f.config
+	configCopy.Connection = connectionConfig
+	return &GRPCNodeFactory{config: &configCopy}, nil
+}
+
 // CreateNode creates a new gRPC node from NodeInfo.
 func (f *GRPCNodeFactory) CreateNode(info gyro.NodeInfo) (gyro.Node, error) {
 	conn, err := NewGRPCConnection(info.Address, f.config.Connection)

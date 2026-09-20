@@ -249,6 +249,15 @@ type NodeFactory interface {
 	CreateNode(info NodeInfo) (Node, error)
 }
 
+// ConnectionConfigurableNodeFactory creates a node factory for a new
+// connection configuration without mutating the factory used by the current
+// runtime. Client configuration reloads use this capability to build a new
+// locator before swapping it into the running client.
+type ConnectionConfigurableNodeFactory interface {
+	NodeFactory
+	WithConnectionConfig(config ConnectionConfig) (NodeFactory, error)
+}
+
 // NewClient creates a new client with dependency injection.
 func NewClient(serviceName string, discovery ServiceDiscovery, configManager *ConfigManager, nodeFactory NodeFactory, healthChecker HealthChecker) (*Client, error) {
 	if serviceName == "" {
@@ -301,31 +310,47 @@ func (c *Client) log() *slog.Logger {
 	return c.logger.Load()
 }
 
-// initializeUnsafe initializes the client with current service nodes (caller must hold lock).
-func (c *Client) initializeUnsafe() error {
+// buildLocatorUnsafe builds a locator from a configuration snapshot (caller
+// must hold c.mu). It does not publish the locator to the client, so callers
+// can validate the complete replacement before changing live state.
+func (c *Client) buildLocatorUnsafe(config *ClientConfig, nodeFactory NodeFactory) (Locator, error) {
 	ctx := context.Background()
 
 	nodeInfos, err := c.discovery.Discover(ctx, c.serviceName)
 	if err != nil {
-		return fmt.Errorf("failed to discover initial nodes: %w", err)
+		return nil, fmt.Errorf("failed to discover initial nodes: %w", err)
 	}
 
-	config := c.configManager.GetConfig()
 	baseLocator, err := NewConsistentLocator(config.Locator)
 	if err != nil {
-		return fmt.Errorf("failed to create locator: %w", err)
+		return nil, fmt.Errorf("failed to create locator: %w", err)
 	}
 	baseLocator.SetLogger(c.log())
 
 	for _, nodeInfo := range nodeInfos {
-		node, err := c.nodeFactory.CreateNode(nodeInfo)
+		node, err := nodeFactory.CreateNode(nodeInfo)
 		if err != nil {
-			return fmt.Errorf("failed to create node %s: %w", nodeInfo.ID, err)
+			_ = baseLocator.Close()
+			return nil, fmt.Errorf("failed to create node %s: %w", nodeInfo.ID, err)
 		}
 
 		if err := baseLocator.AddNode(node); err != nil {
-			return fmt.Errorf("failed to add node %s to locator: %w", nodeInfo.ID, err)
+			_ = node.Close()
+			_ = baseLocator.Close()
+			return nil, fmt.Errorf("failed to add node %s to locator: %w", nodeInfo.ID, err)
 		}
+	}
+
+	return baseLocator, nil
+}
+
+// initializeUnsafe initializes the client with current service nodes (caller
+// must hold c.mu).
+func (c *Client) initializeUnsafe() error {
+	config := c.configManager.GetConfig()
+	baseLocator, err := c.buildLocatorUnsafe(config, c.nodeFactory)
+	if err != nil {
+		return err
 	}
 
 	healthAwarePool := NewHealthAwarePoolWithChecker(baseLocator, c.healthChecker)
@@ -698,6 +723,9 @@ func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 
 // handleConfigChange handles configuration changes with incremental updates.
 func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -705,35 +733,67 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 		return nil
 	}
 
-	var needsPoolRecreation bool
-	var healthCheckerUpdates []func() error
+	locatorChanged := !c.locatorConfigEqual(oldConfig.Locator, newConfig.Locator)
+	connectionChanged := !c.connectionConfigEqual(oldConfig.Connection, newConfig.Connection)
+	healthCheckerChanged := !c.healthCheckerConfigEqual(oldConfig.HealthChecker, newConfig.HealthChecker)
 
-	if !c.locatorConfigEqual(oldConfig.Locator, newConfig.Locator) {
-		needsPoolRecreation = true
-		c.log().Info("locator config changed, recreating locator")
+	var (
+		replacementLocator Locator
+		replacementFactory NodeFactory
+	)
+
+	if locatorChanged || connectionChanged {
+		replacementFactory = c.nodeFactory
+		if connectionChanged {
+			configurableFactory, ok := c.nodeFactory.(ConnectionConfigurableNodeFactory)
+			if !ok {
+				return fmt.Errorf("node factory does not support connection configuration updates")
+			}
+
+			var err error
+			replacementFactory, err = configurableFactory.WithConnectionConfig(newConfig.Connection)
+			if err != nil {
+				return fmt.Errorf("failed to prepare node factory for connection config update: %w", err)
+			}
+		}
+
+		var err error
+		replacementLocator, err = c.buildLocatorUnsafe(newConfig, replacementFactory)
+		if err != nil {
+			return fmt.Errorf("failed to build replacement locator: %w", err)
+		}
 	}
 
-	if !c.healthCheckerConfigEqual(oldConfig.HealthChecker, newConfig.HealthChecker) {
-		healthCheckerUpdates = append(healthCheckerUpdates, func() error {
-			return c.updateHealthCheckerConfig(newConfig.HealthChecker)
-		})
-		c.log().Info("health checker config changed")
-	}
-
-	if !c.connectionConfigEqual(oldConfig.Connection, newConfig.Connection) {
-		// TODO: connection config changes need node recreation; not implemented yet.
-		c.log().Warn("connection config changed, node recreation not implemented")
-	}
-
-	if needsPoolRecreation {
-		return c.initializeUnsafe()
-	}
-
-	for _, update := range healthCheckerUpdates {
-		if err := update(); err != nil {
+	if healthCheckerChanged {
+		if err := c.updateHealthCheckerConfig(newConfig.HealthChecker); err != nil {
+			if replacementLocator != nil {
+				_ = replacementLocator.Close()
+			}
 			c.log().Error("failed to update health checker config", "error", err)
 			return err
 		}
+	}
+
+	if replacementLocator != nil {
+		healthAwarePool, ok := c.locator.(*HealthAwarePool)
+		if !ok {
+			_ = replacementLocator.Close()
+			return fmt.Errorf("active locator does not support atomic replacement")
+		}
+
+		if err := healthAwarePool.ReplaceLocator(replacementLocator); err != nil {
+			_ = replacementLocator.Close()
+			if healthCheckerChanged {
+				if rollbackErr := c.updateHealthCheckerConfig(oldConfig.HealthChecker); rollbackErr != nil {
+					return fmt.Errorf("failed to replace active locator: %v; failed to roll back health checker config: %w", err, rollbackErr)
+				}
+			}
+			return fmt.Errorf("failed to replace active locator: %w", err)
+		}
+
+		c.nodeFactory = replacementFactory
+		c.log().Info("client locator replaced after configuration change",
+			"locator_changed", locatorChanged, "connection_changed", connectionChanged)
 	}
 
 	c.log().Info("config update completed")
@@ -830,6 +890,10 @@ func (c *Client) connectionConfigEqual(old, new ConnectionConfig) bool {
 
 // updateHealthCheckerConfig updates the health checker configuration
 func (c *Client) updateHealthCheckerConfig(newConfig HealthCheckerConfig) error {
+	if err := validateHealthCheckerConfig(newConfig); err != nil {
+		return fmt.Errorf("invalid health checker config: %w", err)
+	}
+
 	if err := c.healthChecker.UpdateConfig(newConfig); err != nil {
 		return fmt.Errorf("failed to update health checker config: %w", err)
 	}
