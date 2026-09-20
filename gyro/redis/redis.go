@@ -82,7 +82,7 @@ type RedisNode struct {
 	address string
 	conn    RedisConnection
 	mu      sync.RWMutex
-	healthy bool
+	closed  bool
 }
 
 func NewRedisNode(id, address string, conn RedisConnection) *RedisNode {
@@ -90,7 +90,6 @@ func NewRedisNode(id, address string, conn RedisConnection) *RedisNode {
 		id:      id,
 		address: address,
 		conn:    conn,
-		healthy: true,
 	}
 }
 
@@ -103,24 +102,24 @@ func (rn *RedisNode) Address() string {
 }
 
 func (rn *RedisNode) IsHealthy(ctx context.Context) bool {
-	if err := rn.conn.Ping(ctx); err != nil {
-		rn.mu.Lock()
-		rn.healthy = false
-		rn.mu.Unlock()
+	rn.mu.RLock()
+	closed := rn.closed
+	rn.mu.RUnlock()
+	if closed {
 		return false
 	}
 
-	rn.mu.Lock()
-	rn.healthy = true
-	rn.mu.Unlock()
-	return true
+	return rn.conn.Ping(ctx) == nil
 }
 
 func (rn *RedisNode) Close() error {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
 
-	rn.healthy = false
+	if rn.closed {
+		return nil
+	}
+	rn.closed = true
 	return rn.conn.Close()
 }
 
@@ -128,7 +127,7 @@ func (rn *RedisNode) GetNativeClient() any {
 	rn.mu.RLock()
 	defer rn.mu.RUnlock()
 
-	if !rn.healthy {
+	if rn.closed {
 		return nil
 	}
 

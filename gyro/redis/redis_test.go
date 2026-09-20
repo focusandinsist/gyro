@@ -127,6 +127,24 @@ func TestRedisConvenienceClientRejectsInvalidHealthConfig(t *testing.T) {
 	}
 }
 
+func TestRedisNodeDoesNotGateNativeClientOnSingleFailedProbe(t *testing.T) {
+	connection := newTestRedisConnection("redis.test")
+	node := NewRedisNode("redis-1", "redis.test", connection)
+	connection.healthy.Store(false)
+	if node.IsHealthy(context.Background()) {
+		t.Fatal("probe should report the connection unhealthy")
+	}
+	if node.GetNativeClient() != connection.native {
+		t.Fatal("probe result must not override the health pool's threshold decision")
+	}
+	if err := node.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if node.GetNativeClient() != nil {
+		t.Fatal("closed node must not expose its native client")
+	}
+}
+
 func findRedisKeyForNode(t *testing.T, locator gyro.Locator, nodeID string) string {
 	t.Helper()
 	for i := 0; i < 10000; i++ {

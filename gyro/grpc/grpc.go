@@ -109,7 +109,7 @@ type GRPCNode struct {
 	address string
 	conn    GRPCConnection
 	mu      sync.RWMutex
-	healthy bool
+	closed  bool
 }
 
 func NewGRPCNode(id, address string, conn GRPCConnection) *GRPCNode {
@@ -117,7 +117,6 @@ func NewGRPCNode(id, address string, conn GRPCConnection) *GRPCNode {
 		id:      id,
 		address: address,
 		conn:    conn,
-		healthy: true,
 	}
 }
 
@@ -130,24 +129,24 @@ func (gn *GRPCNode) Address() string {
 }
 
 func (gn *GRPCNode) IsHealthy(ctx context.Context) bool {
-	if err := gn.conn.Ping(ctx); err != nil {
-		gn.mu.Lock()
-		gn.healthy = false
-		gn.mu.Unlock()
+	gn.mu.RLock()
+	closed := gn.closed
+	gn.mu.RUnlock()
+	if closed {
 		return false
 	}
 
-	gn.mu.Lock()
-	gn.healthy = true
-	gn.mu.Unlock()
-	return true
+	return gn.conn.Ping(ctx) == nil
 }
 
 func (gn *GRPCNode) Close() error {
 	gn.mu.Lock()
 	defer gn.mu.Unlock()
 
-	gn.healthy = false
+	if gn.closed {
+		return nil
+	}
+	gn.closed = true
 	return gn.conn.Close()
 }
 
@@ -155,7 +154,7 @@ func (gn *GRPCNode) GetNativeClient() any {
 	gn.mu.RLock()
 	defer gn.mu.RUnlock()
 
-	if !gn.healthy {
+	if gn.closed {
 		return nil
 	}
 

@@ -60,16 +60,23 @@ func DefaultHealthCheckerConfig() HealthCheckerConfig {
 }
 
 type DefaultHealthChecker struct {
-	mu              sync.RWMutex
-	config          HealthCheckerConfig
-	nodes           map[string]Node
-	nodeStats       map[string]*NodeHealthStats
-	stopCh          chan struct{}
-	running         bool
-	healthListeners []HealthListener
+	lifecycleMu      sync.Mutex
+	mu               sync.RWMutex
+	config           HealthCheckerConfig
+	nodes            map[string]Node
+	nodeStats        map[string]*NodeHealthStats
+	healthListeners  []HealthListener
+	notificationTail chan struct{}
+	parentCtx        context.Context
+	run              *healthCheckRun
+	maxWorkers       int
+}
 
-	healthCheckChan chan Node
-	maxWorkers      int
+type healthCheckRun struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+	queue  chan Node
 }
 
 type NodeHealthStats struct {
@@ -88,9 +95,7 @@ func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
 		config:          config,
 		nodes:           make(map[string]Node),
 		nodeStats:       make(map[string]*NodeHealthStats),
-		stopCh:          make(chan struct{}),
 		healthListeners: make([]HealthListener, 0),
-		healthCheckChan: make(chan Node, 100),
 		maxWorkers:      10,
 	}
 }
@@ -98,7 +103,6 @@ func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
 // Check performs a health check on the given node.
 func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
 	hc.mu.Lock()
-	defer hc.mu.Unlock()
 
 	nodeID := node.ID()
 	stats, exists := hc.nodeStats[nodeID]
@@ -114,6 +118,10 @@ func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
 	defer cancel()
 
 	healthy := node.IsHealthy(checkCtx)
+	var listeners []HealthListener
+	var previousNotification <-chan struct{}
+	var notificationDone chan struct{}
+	notify := false
 
 	// Require FailureThreshold/RecoveryThreshold consecutive results before
 	// flipping status, so a single flaky check doesn't cause flapping.
@@ -122,7 +130,7 @@ func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
 		stats.ConsecutiveSuccesses++
 		if !stats.IsHealthy && stats.ConsecutiveSuccesses >= hc.config.RecoveryThreshold {
 			stats.IsHealthy = true
-			hc.notifyHealthChange(nodeID, true)
+			notify = true
 		}
 	} else {
 		stats.TotalFailures++
@@ -130,8 +138,27 @@ func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
 		stats.ConsecutiveFailures++
 		if stats.IsHealthy && stats.ConsecutiveFailures >= hc.config.FailureThreshold {
 			stats.IsHealthy = false
-			hc.notifyHealthChange(nodeID, false)
+			notify = true
 		}
+	}
+	if notify {
+		listeners = append(listeners, hc.healthListeners...)
+		previousNotification = hc.notificationTail
+		notificationDone = make(chan struct{})
+		hc.notificationTail = notificationDone
+	}
+	hc.mu.Unlock()
+
+	if notify {
+		go func() {
+			defer close(notificationDone)
+			if previousNotification != nil {
+				<-previousNotification
+			}
+			for _, listener := range listeners {
+				listener(nodeID, healthy)
+			}
+		}()
 	}
 
 	return nil
@@ -164,30 +191,30 @@ func (hc *DefaultHealthChecker) RemoveNode(nodeID string) {
 
 // StartMonitoring starts continuous health monitoring.
 func (hc *DefaultHealthChecker) StartMonitoring(ctx context.Context) {
-	hc.mu.Lock()
-	if hc.running {
-		hc.mu.Unlock()
+	if ctx == nil || ctx.Err() != nil {
 		return
 	}
-	hc.running = true
-	hc.mu.Unlock()
+	hc.lifecycleMu.Lock()
+	defer hc.lifecycleMu.Unlock()
+	if hc.run != nil || hc.parentCtx != nil {
+		return
+	}
 
-	hc.startWorkerPool(ctx)
-	go hc.monitoringLoop(ctx)
+	hc.parentCtx = ctx
+	hc.mu.RLock()
+	config := hc.config
+	hc.mu.RUnlock()
+	if config.Enabled {
+		hc.startRun(config.Interval)
+	}
 }
 
 // StopMonitoring stops health monitoring.
 func (hc *DefaultHealthChecker) StopMonitoring() {
-	hc.mu.Lock()
-	defer hc.mu.Unlock()
-
-	if !hc.running {
-		return
-	}
-
-	hc.running = false
-	close(hc.stopCh)
-	hc.stopCh = make(chan struct{})
+	hc.lifecycleMu.Lock()
+	defer hc.lifecycleMu.Unlock()
+	hc.parentCtx = nil
+	hc.stopRun()
 }
 
 // UpdateConfig updates the health checker configuration dynamically
@@ -196,32 +223,19 @@ func (hc *DefaultHealthChecker) UpdateConfig(newConfig HealthCheckerConfig) erro
 		return err
 	}
 
+	hc.lifecycleMu.Lock()
+	defer hc.lifecycleMu.Unlock()
 	hc.mu.Lock()
-	defer hc.mu.Unlock()
-
 	oldConfig := hc.config
+	hc.mu.Unlock()
+	if hc.run != nil && (oldConfig.Interval != newConfig.Interval || !newConfig.Enabled) {
+		hc.stopRun()
+	}
+	hc.mu.Lock()
 	hc.config = newConfig
-
-	// The ticker interval is fixed at monitoringLoop startup, so a change
-	// requires stopping and restarting the loop rather than adjusting it live.
-	if hc.running && oldConfig.Interval != newConfig.Interval {
-		hc.running = false
-		close(hc.stopCh)
-		hc.stopCh = make(chan struct{})
-
-		if newConfig.Enabled {
-			hc.running = true
-			hc.startWorkerPool(context.Background())
-			go hc.monitoringLoop(context.Background())
-		}
-	} else if !oldConfig.Enabled && newConfig.Enabled && !hc.running {
-		hc.running = true
-		hc.startWorkerPool(context.Background())
-		go hc.monitoringLoop(context.Background())
-	} else if oldConfig.Enabled && !newConfig.Enabled && hc.running {
-		hc.running = false
-		close(hc.stopCh)
-		hc.stopCh = make(chan struct{})
+	hc.mu.Unlock()
+	if hc.run == nil && newConfig.Enabled && hc.parentCtx != nil && hc.parentCtx.Err() == nil {
+		hc.startRun(newConfig.Interval)
 	}
 
 	return nil
@@ -281,36 +295,62 @@ func (hc *DefaultHealthChecker) GetNodeStats(nodeID string) *NodeHealthStats {
 	}
 }
 
-// startWorkerPool starts the worker pool for concurrent health checks.
-func (hc *DefaultHealthChecker) startWorkerPool(ctx context.Context) {
+// startRun and stopRun are serialized by lifecycleMu. Each worker captures
+// only its own run, so a restart cannot redirect an old worker to a new queue.
+func (hc *DefaultHealthChecker) startRun(interval time.Duration) {
+	ctx, cancel := context.WithCancel(hc.parentCtx)
+	run := &healthCheckRun{
+		ctx: ctx, cancel: cancel, done: make(chan struct{}), queue: make(chan Node, 100),
+	}
+	hc.run = run
+	var workers sync.WaitGroup
+	workers.Add(hc.maxWorkers + 1)
 	for i := 0; i < hc.maxWorkers; i++ {
 		go func() {
+			defer workers.Done()
 			for {
 				select {
-				case <-ctx.Done():
+				case <-run.ctx.Done():
 					return
-				case <-hc.stopCh:
-					return
-				case node := <-hc.healthCheckChan:
+				case node := <-run.queue:
+					if run.ctx.Err() != nil {
+						return
+					}
 					if node != nil {
-						hc.Check(ctx, node)
+						hc.Check(run.ctx, node)
 					}
 				}
 			}
 		}()
 	}
+	go func() {
+		defer workers.Done()
+		hc.monitoringLoop(run, interval)
+	}()
+	go func() {
+		workers.Wait()
+		close(run.done)
+	}()
+}
+
+func (hc *DefaultHealthChecker) stopRun() {
+	if hc.run == nil {
+		return
+	}
+	run := hc.run
+	run.cancel()
+	<-run.done
+	hc.run = nil
 }
 
 // monitoringLoop runs the continuous health monitoring.
-func (hc *DefaultHealthChecker) monitoringLoop(ctx context.Context) {
-	ticker := time.NewTicker(hc.config.Interval)
+func (hc *DefaultHealthChecker) monitoringLoop(run *healthCheckRun, interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-ctx.Done():
-			return
-		case <-hc.stopCh:
+		case <-run.ctx.Done():
 			return
 		case <-ticker.C:
 			hc.mu.RLock()
@@ -322,20 +362,15 @@ func (hc *DefaultHealthChecker) monitoringLoop(ctx context.Context) {
 
 			for _, node := range nodes {
 				select {
-				case hc.healthCheckChan <- node:
+				case <-run.ctx.Done():
+					return
+				case run.queue <- node:
 				default:
 					// Worker pool is saturated; drop this node's check rather
 					// than block the ticker loop until the next cycle.
 				}
 			}
 		}
-	}
-}
-
-// notifyHealthChange notifies all listeners about a health status change.
-func (hc *DefaultHealthChecker) notifyHealthChange(nodeID string, healthy bool) {
-	for _, listener := range hc.healthListeners {
-		go listener(nodeID, healthy)
 	}
 }
 
@@ -357,11 +392,13 @@ type HealthAwarePoolStats struct {
 type HealthAwarePool struct {
 	Locator
 	locatorMu       sync.RWMutex
+	monitorMu       sync.Mutex
 	healthChecker   HealthChecker
 	healthyNodes    map[string]bool
 	healthEventChan chan HealthEvent
 	mu              sync.RWMutex
 	closed          bool
+	monitorStarted  bool
 	closeOnce       sync.Once
 	closeErr        error
 	eventDoneCh     chan struct{}
@@ -467,18 +504,19 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 
 // StartHealthMonitoring starts health monitoring for all nodes in the locator.
 func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	hap.monitorMu.Lock()
+	defer hap.monitorMu.Unlock()
 	hap.mu.Lock()
-	if hap.closed {
+	if hap.closed || hap.monitorStarted {
 		hap.mu.Unlock()
 		return
 	}
+	hap.monitorStarted = true
 	hap.processorWG.Add(1)
 	hap.mu.Unlock()
-
-	if !hap.healthChecker.IsEnabled() {
-		hap.processorWG.Done()
-		return
-	}
 
 	for _, node := range hap.GetAllNodes() {
 		hap.healthChecker.AddNode(node)
@@ -700,6 +738,8 @@ func (hap *HealthAwarePool) ReplaceLocator(newLocator Locator) error {
 // Close closes the locator and stops health monitoring.
 func (hap *HealthAwarePool) Close() error {
 	hap.closeOnce.Do(func() {
+		hap.monitorMu.Lock()
+		defer hap.monitorMu.Unlock()
 		hap.mu.Lock()
 		hap.closed = true
 		close(hap.eventDoneCh)
