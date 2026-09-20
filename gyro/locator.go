@@ -33,6 +33,13 @@ type LocatorConfig struct {
 	HashFunction      string  `json:"hash_function"`
 }
 
+type hashRing interface {
+	LocateKey(ctx context.Context, key []byte) (string, error)
+	LocateReplicas(ctx context.Context, key []byte, count int) ([]string, error)
+	Add(ctx context.Context, member string) error
+	Remove(ctx context.Context, member string) error
+}
+
 func DefaultLocatorConfig() LocatorConfig {
 	return LocatorConfig{
 		PartitionCount:    271,
@@ -45,7 +52,7 @@ func DefaultLocatorConfig() LocatorConfig {
 type ConsistentLocator struct {
 	mu     sync.RWMutex
 	nodes  map[string]Node
-	ring   *consistent.Consistent
+	ring   hashRing
 	config LocatorConfig
 	logger atomic.Pointer[slog.Logger]
 }
@@ -184,27 +191,18 @@ func (cl *ConsistentLocator) RemoveNode(nodeID string) error {
 		return fmt.Errorf("node ID cannot be empty")
 	}
 
-	var nodeToClose Node
-	func() {
-		cl.mu.Lock()
-		defer cl.mu.Unlock()
-
-		node, exists := cl.nodes[nodeID]
-		if !exists {
-			return
-		}
-
-		if err := cl.ring.Remove(context.Background(), nodeID); err != nil {
-			cl.log().Warn("failed to remove node from consistent hash ring", "node_id", nodeID, "error", err)
-		}
-
-		delete(cl.nodes, nodeID)
-		nodeToClose = node
-	}()
-
-	if nodeToClose == nil {
+	cl.mu.Lock()
+	nodeToClose, exists := cl.nodes[nodeID]
+	if !exists {
+		cl.mu.Unlock()
 		return fmt.Errorf("node %s not found in locator", nodeID)
 	}
+	if err := cl.ring.Remove(context.Background(), nodeID); err != nil {
+		cl.mu.Unlock()
+		return fmt.Errorf("failed to remove node %s from consistent hash ring: %w", nodeID, err)
+	}
+	delete(cl.nodes, nodeID)
+	cl.mu.Unlock()
 
 	// Close outside the lock so a slow Close() doesn't block other locator operations.
 	if err := nodeToClose.Close(); err != nil {

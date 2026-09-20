@@ -2,11 +2,14 @@ package gyro
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/focusandinsist/consistent-go/consistent"
 )
 
 // HealthChecker provides health checking capabilities for nodes.
@@ -481,7 +484,21 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 		return node, nil
 	}
 
-	replicas, err := locator.GetReplicas(ctx, key, 3)
+	replicaCount := len(locator.GetAllNodes())
+	if replicaCount > 3 {
+		replicaCount = 3
+	}
+	var replicas []Node
+	for replicaCount > 0 {
+		replicas, err = locator.GetReplicas(ctx, key, replicaCount)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, consistent.ErrInsufficientMemberCount) {
+			return nil, err
+		}
+		replicaCount--
+	}
 	if err != nil {
 		return nil, err
 	}

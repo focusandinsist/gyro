@@ -2,8 +2,19 @@ package gyro
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 )
+
+type removeFailingRing struct {
+	hashRing
+	err error
+}
+
+func (r *removeFailingRing) Remove(context.Context, string) error {
+	return r.err
+}
 
 func TestConsistentLocator_AddNode(t *testing.T) {
 	config := DefaultLocatorConfig()
@@ -277,5 +288,41 @@ func TestConsistentLocator_DuplicateNode(t *testing.T) {
 	allNodes := locator.GetAllNodes()
 	if len(allNodes) != 1 {
 		t.Errorf("Expected 1 node after duplicate add attempt, got %d", len(allNodes))
+	}
+}
+
+func TestConsistentLocator_RemoveFailureKeepsNodeAndConnection(t *testing.T) {
+	locator, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatalf("NewConsistentLocator failed: %v", err)
+	}
+	node1 := NewMockNode("node1", "127.0.0.1:6379")
+	node2 := NewMockNode("node2", "127.0.0.1:6380")
+	if err := locator.AddNode(node1); err != nil {
+		t.Fatalf("AddNode(node1) failed: %v", err)
+	}
+	if err := locator.AddNode(node2); err != nil {
+		t.Fatalf("AddNode(node2) failed: %v", err)
+	}
+	removeErr := errors.New("ring removal failed")
+	locator.ring = &removeFailingRing{hashRing: locator.ring, err: removeErr}
+
+	if err := locator.RemoveNode(node1.ID()); !errors.Is(err, removeErr) {
+		t.Fatalf("RemoveNode error = %v, want %v", err, removeErr)
+	}
+	if got := len(locator.GetAllNodes()); got != 2 {
+		t.Fatalf("failed ring removal changed node map size to %d, want 2", got)
+	}
+	if !node1.IsHealthy(context.Background()) {
+		t.Fatal("failed ring removal closed the node connection")
+	}
+	for i := 0; i < 100; i++ {
+		node, err := locator.Get(context.Background(), fmt.Sprintf("key-%d", i))
+		if err != nil {
+			t.Fatalf("Get after failed removal returned split ring/map state: %v", err)
+		}
+		if node.ID() != node1.ID() && node.ID() != node2.ID() {
+			t.Fatalf("Get returned unknown node %q", node.ID())
+		}
 	}
 }

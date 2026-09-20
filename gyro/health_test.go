@@ -2,6 +2,7 @@ package gyro
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -82,6 +83,57 @@ func TestHealthAwarePool_CloseStopsProcessorAndRejectsLateEvents(t *testing.T) {
 
 	if err := pool.Close(); err != nil {
 		t.Fatalf("second close failed: %v", err)
+	}
+}
+
+func TestHealthAwarePoolSmallClusterFailover(t *testing.T) {
+	t.Run("0_nodes", func(t *testing.T) {
+		locator, err := NewConsistentLocator(DefaultLocatorConfig())
+		if err != nil {
+			t.Fatalf("NewConsistentLocator failed: %v", err)
+		}
+		pool := NewHealthAwarePoolWithChecker(locator, &controllableHealthChecker{config: DefaultHealthCheckerConfig()})
+		if _, err := pool.Get(context.Background(), "small-cluster-key"); err == nil {
+			t.Fatal("Get with no nodes succeeded, want no-nodes error")
+		}
+	})
+
+	for _, nodeCount := range []int{1, 2} {
+		t.Run(fmt.Sprintf("%d_nodes", nodeCount), func(t *testing.T) {
+			locator, err := NewConsistentLocator(DefaultLocatorConfig())
+			if err != nil {
+				t.Fatalf("NewConsistentLocator failed: %v", err)
+			}
+			for i := 1; i <= nodeCount; i++ {
+				node := NewMockNode(fmt.Sprintf("node-%d", i), fmt.Sprintf("127.0.0.1:%d", 6378+i))
+				if err := locator.AddNode(node); err != nil {
+					t.Fatalf("AddNode failed: %v", err)
+				}
+			}
+
+			checker := &controllableHealthChecker{config: DefaultHealthCheckerConfig()}
+			pool := NewHealthAwarePoolWithChecker(locator, checker)
+			pool.StartHealthMonitoring(context.Background())
+			defer pool.Close()
+
+			const key = "small-cluster-key"
+			primary, err := locator.Get(context.Background(), key)
+			if err != nil {
+				t.Fatalf("Get primary failed: %v", err)
+			}
+			checker.Emit(primary.ID(), false)
+
+			got, err := pool.Get(context.Background(), key)
+			if err != nil {
+				t.Fatalf("Get with %d nodes returned an error: %v", nodeCount, err)
+			}
+			if nodeCount == 1 && got.ID() != primary.ID() {
+				t.Fatalf("single-node fallback returned %q, want primary %q", got.ID(), primary.ID())
+			}
+			if nodeCount == 2 && got.ID() == primary.ID() {
+				t.Fatalf("two-node failover returned unhealthy primary %q", primary.ID())
+			}
+		})
 	}
 }
 

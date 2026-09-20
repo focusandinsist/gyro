@@ -77,56 +77,49 @@ func (ssd *StaticServiceDiscovery) UpdateNodes(serviceName string, addresses []s
 	}
 
 	ssd.services[serviceName] = nodes
+	ssd.publishLocked(serviceName)
 
 	if serviceName != "default" && len(ssd.services) == 1 {
-		ssd.services["default"] = nodes
-	}
-
-	if watchers, exists := ssd.watchers[serviceName]; exists {
-		for _, ch := range watchers {
-			select {
-			case ch <- nodes:
-			default: // watcher isn't ready for this update, drop it rather than block
-			}
-		}
+		ssd.services["default"] = cloneNodeInfos(nodes)
+		ssd.publishLocked("default")
 	}
 }
 
 // Discover discovers available service nodes.
 func (ssd *StaticServiceDiscovery) Discover(ctx context.Context, serviceName string) ([]NodeInfo, error) {
-	ssd.mu.RLock()
-	defer ssd.mu.RUnlock()
+	ssd.mu.Lock()
+	defer ssd.mu.Unlock()
 
 	nodes, exists := ssd.services[serviceName]
 	if !exists {
 		if defaultNodes, hasDefault := ssd.services["default"]; hasDefault {
-			result := make([]NodeInfo, len(defaultNodes))
-			copy(result, defaultNodes)
-
-			ssd.mu.RUnlock()
-			ssd.mu.Lock()
-			ssd.services[serviceName] = result
-			ssd.mu.Unlock()
-			ssd.mu.RLock()
+			result := cloneNodeInfos(defaultNodes)
+			ssd.services[serviceName] = cloneNodeInfos(result)
 			return result, nil
 		}
 		return []NodeInfo{}, nil
 	}
 
-	result := make([]NodeInfo, len(nodes))
-	copy(result, nodes)
-	return result, nil
+	return cloneNodeInfos(nodes), nil
 }
 
 // Watch watches for changes in service nodes.
 func (ssd *StaticServiceDiscovery) Watch(ctx context.Context, serviceName string) (<-chan []NodeInfo, error) {
-	ch := make(chan []NodeInfo, 10)
+	ch := make(chan []NodeInfo, 1)
 
 	ssd.mu.Lock()
 	if ssd.watchers[serviceName] == nil {
 		ssd.watchers[serviceName] = make([]chan []NodeInfo, 0)
 	}
 	ssd.watchers[serviceName] = append(ssd.watchers[serviceName], ch)
+	nodes, exists := ssd.services[serviceName]
+	if !exists {
+		if defaultNodes, hasDefault := ssd.services["default"]; hasDefault {
+			nodes = cloneNodeInfos(defaultNodes)
+			ssd.services[serviceName] = nodes
+		}
+	}
+	ch <- cloneNodeInfos(nodes)
 	ssd.mu.Unlock()
 
 	go func() {
@@ -144,18 +137,6 @@ func (ssd *StaticServiceDiscovery) Watch(ctx context.Context, serviceName string
 			close(ch)
 		}()
 
-		nodes, err := ssd.Discover(ctx, serviceName)
-		if err != nil {
-			return
-		}
-
-		select {
-		case ch <- nodes:
-		case <-ctx.Done():
-			return
-		}
-
-		// Nothing to poll for; further updates arrive via UpdateNodes.
 		<-ctx.Done()
 	}()
 
@@ -173,12 +154,14 @@ func (ssd *StaticServiceDiscovery) Register(ctx context.Context, serviceName str
 
 	for i, existing := range ssd.services[serviceName] {
 		if existing.ID == node.ID {
-			ssd.services[serviceName][i] = node
+			ssd.services[serviceName][i] = cloneNodeInfo(node)
+			ssd.publishLocked(serviceName)
 			return nil
 		}
 	}
 
-	ssd.services[serviceName] = append(ssd.services[serviceName], node)
+	ssd.services[serviceName] = append(ssd.services[serviceName], cloneNodeInfo(node))
+	ssd.publishLocked(serviceName)
 	return nil
 }
 
@@ -197,6 +180,7 @@ func (ssd *StaticServiceDiscovery) Unregister(ctx context.Context, serviceName s
 			// Order doesn't matter here, so swap-and-truncate instead of shifting.
 			nodes[i] = nodes[len(nodes)-1]
 			ssd.services[serviceName] = nodes[:len(nodes)-1]
+			ssd.publishLocked(serviceName)
 			return nil
 		}
 	}
@@ -209,9 +193,45 @@ func (ssd *StaticServiceDiscovery) SetNodes(serviceName string, nodes []NodeInfo
 	ssd.mu.Lock()
 	defer ssd.mu.Unlock()
 
-	nodesCopy := make([]NodeInfo, len(nodes))
-	copy(nodesCopy, nodes)
-	ssd.services[serviceName] = nodesCopy
+	ssd.services[serviceName] = cloneNodeInfos(nodes)
+	ssd.publishLocked(serviceName)
+}
+
+func (ssd *StaticServiceDiscovery) publishLocked(serviceName string) {
+	nodes := ssd.services[serviceName]
+	for _, watcher := range ssd.watchers[serviceName] {
+		snapshot := cloneNodeInfos(nodes)
+		select {
+		case watcher <- snapshot:
+		default:
+			// A watcher needs state, not every intermediate mutation. Replace its
+			// pending snapshot so it eventually observes the latest topology.
+			select {
+			case <-watcher:
+			default:
+			}
+			watcher <- snapshot
+		}
+	}
+}
+
+func cloneNodeInfos(nodes []NodeInfo) []NodeInfo {
+	result := make([]NodeInfo, len(nodes))
+	for i, node := range nodes {
+		result[i] = cloneNodeInfo(node)
+	}
+	return result
+}
+
+func cloneNodeInfo(node NodeInfo) NodeInfo {
+	result := node
+	if node.Metadata != nil {
+		result.Metadata = make(map[string]string, len(node.Metadata))
+		for key, value := range node.Metadata {
+			result.Metadata[key] = value
+		}
+	}
+	return result
 }
 
 // ClientHealth represents the health status of the client
