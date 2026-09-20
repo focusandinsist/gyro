@@ -225,13 +225,15 @@ type ClientHealth struct {
 // Client provides configuration and service discovery.
 type Client struct {
 	mu            sync.RWMutex
+	lifecycleMu   sync.Mutex
 	locator       Locator
 	healthChecker HealthChecker
 	serviceName   string
 	discovery     ServiceDiscovery
 	configManager *ConfigManager
-	stopCh        chan struct{}
 	running       bool
+	runCancel     context.CancelFunc
+	configWatcher bool
 	nodeFactory   NodeFactory
 	logger        atomic.Pointer[slog.Logger]
 
@@ -271,7 +273,6 @@ func NewClient(serviceName string, discovery ServiceDiscovery, configManager *Co
 		configManager: configManager,
 		nodeFactory:   nodeFactory,
 		healthChecker: healthChecker,
-		stopCh:        make(chan struct{}),
 
 		// False until watchServiceNodes establishes its first watch.
 		serviceDiscoveryHealthy: false,
@@ -368,17 +369,41 @@ func (c *Client) nodeNeedsUpdate(currentNode Node, newNodeInfo NodeInfo) bool {
 
 // Start starts the client with service discovery and config watching.
 func (c *Client) Start(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("context cannot be nil")
+	}
+
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+
 	c.mu.Lock()
 	if c.running {
 		c.mu.Unlock()
 		return fmt.Errorf("client is already running")
 	}
+
+	// Stop releases the locator so a later Start can create a fresh run with
+	// new node connections and a new HealthAwarePool.
+	if c.locator == nil {
+		if err := c.initializeUnsafe(); err != nil {
+			c.mu.Unlock()
+			return fmt.Errorf("failed to initialize client for start: %w", err)
+		}
+	}
+
+	runCtx, runCancel := context.WithCancel(ctx)
+	c.runCancel = runCancel
 	c.running = true
+	registerConfigWatcher := !c.configWatcher
+	c.configWatcher = true
 	c.mu.Unlock()
 
-	go c.watchServiceNodes(ctx)
-	go c.startHealthMonitoringWhenReady(ctx)
-	c.configManager.AddConfigWatcher(c.handleConfigChange)
+	if registerConfigWatcher {
+		c.configManager.AddConfigWatcher(c.handleConfigChange)
+	}
+
+	go c.watchServiceNodes(runCtx)
+	go c.startHealthMonitoringWhenReady(runCtx)
 
 	return nil
 }
@@ -409,17 +434,23 @@ func (c *Client) startHealthMonitoringWhenReady(ctx context.Context) {
 
 // Stop stops the client.
 func (c *Client) Stop() error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+
 	c.mu.Lock()
-	if !c.running {
-		c.mu.Unlock()
-		return nil
-	}
+	runCancel := c.runCancel
+	locator := c.locator
+	c.runCancel = nil
 	c.running = false
-	close(c.stopCh)
+	c.locator = nil
 	c.mu.Unlock()
 
-	if c.locator != nil {
-		return c.locator.Close()
+	if runCancel != nil {
+		runCancel()
+	}
+
+	if locator != nil {
+		return locator.Close()
 	}
 
 	return nil
@@ -490,8 +521,6 @@ func (c *Client) watchServiceNodes(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-c.stopCh:
-			return
 		default:
 		}
 
@@ -519,8 +548,6 @@ func (c *Client) watchServiceNodes(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-c.stopCh:
-				return
 			case <-time.After(delay):
 				continue
 			}
@@ -547,8 +574,6 @@ func (c *Client) processServiceWatch(ctx context.Context, nodesCh <-chan []NodeI
 		select {
 		case <-ctx.Done():
 			return false // normal shutdown
-		case <-c.stopCh:
-			return false // normal shutdown
 		case nodes, ok := <-nodesCh:
 			if !ok {
 				return true // channel closed, caller should retry
@@ -562,6 +587,10 @@ func (c *Client) processServiceWatch(ctx context.Context, nodesCh <-chan []NodeI
 func (c *Client) handleServiceNodesChange(newNodeInfos []NodeInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if !c.running {
+		return
+	}
 
 	if c.locator == nil {
 		if err := c.initializeUnsafe(); err != nil {
@@ -672,7 +701,7 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.locator == nil {
+	if !c.running || c.locator == nil {
 		return nil
 	}
 
