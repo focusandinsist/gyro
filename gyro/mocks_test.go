@@ -103,16 +103,22 @@ func (m *MockNode) ResetCheckCallCount() {
 	m.checkCallCount = 0
 }
 
-// MockHealthListener is a test implementation that records health events
+type healthEventRecord struct {
+	NodeID    string
+	Healthy   bool
+	Timestamp time.Time
+}
+
+// MockHealthListener is a test implementation that records health events.
 type MockHealthListener struct {
-	events []HealthEvent
+	events []healthEventRecord
 	mu     sync.RWMutex
 }
 
 // NewMockHealthListener creates a new mock health listener
 func NewMockHealthListener() *MockHealthListener {
 	return &MockHealthListener{
-		events: make([]HealthEvent, 0),
+		events: make([]healthEventRecord, 0),
 	}
 }
 
@@ -121,7 +127,7 @@ func (m *MockHealthListener) AsHealthListener() HealthListener {
 	return func(nodeID string, healthy bool) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		m.events = append(m.events, HealthEvent{
+		m.events = append(m.events, healthEventRecord{
 			NodeID:    nodeID,
 			Healthy:   healthy,
 			Timestamp: time.Now(),
@@ -130,12 +136,12 @@ func (m *MockHealthListener) AsHealthListener() HealthListener {
 }
 
 // GetEvents returns all recorded events
-func (m *MockHealthListener) GetEvents() []HealthEvent {
+func (m *MockHealthListener) GetEvents() []healthEventRecord {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	// Return a copy to avoid race conditions
-	events := make([]HealthEvent, len(m.events))
+	events := make([]healthEventRecord, len(m.events))
 	copy(events, m.events)
 	return events
 }
@@ -148,7 +154,7 @@ func (m *MockHealthListener) GetEventCount() int {
 }
 
 // GetLastEvent returns the last recorded event
-func (m *MockHealthListener) GetLastEvent() *HealthEvent {
+func (m *MockHealthListener) GetLastEvent() *healthEventRecord {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

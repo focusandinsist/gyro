@@ -166,7 +166,7 @@ func TestHealthPoolTracksNodesAfterEnablingChecker(t *testing.T) {
 		t.Fatalf("NewConsistentLocator failed: %v", err)
 	}
 	node := NewMockNode("node-1", "127.0.0.1:6379")
-	if err := locator.AddNode(node); err != nil {
+	if err := locator.AddNodeContext(context.Background(), node); err != nil {
 		t.Fatalf("AddNode failed: %v", err)
 	}
 	pool := NewHealthAwarePoolWithChecker(locator, NewDefaultHealthChecker(config))

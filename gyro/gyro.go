@@ -22,7 +22,6 @@ type NodeInfo struct {
 	ID       string            `json:"id"`
 	Address  string            `json:"address"`
 	Metadata map[string]string `json:"metadata,omitempty"`
-	Weight   int               `json:"weight,omitempty"`
 }
 
 // ServiceDiscovery provides service discovery capabilities.
@@ -381,7 +380,7 @@ func (c *Client) buildLocatorUnsafe(config *ClientConfig, nodeFactory NodeFactor
 			return nil, nil, fmt.Errorf("failed to create node %s: %w", nodeInfo.ID, err)
 		}
 
-		if err := baseLocator.AddNode(node); err != nil {
+		if err := baseLocator.AddNodeContext(context.Background(), node); err != nil {
 			_ = node.Close()
 			return nil, nil, fmt.Errorf("failed to add node %s to locator: %w", nodeInfo.ID, err)
 		}
@@ -434,15 +433,6 @@ func (c *Client) getPoolNodes() []Node {
 		return nil
 	}
 	return locator.GetAllNodes()
-}
-
-// nodeNeedsUpdate checks if a node needs to be updated based on NodeInfo changes
-func (c *Client) nodeNeedsUpdate(currentNode Node, newNodeInfo NodeInfo) bool {
-	if currentNode.Address() != newNodeInfo.Address {
-		return true
-	}
-	oldNodeInfo, exists := c.nodeInfos[newNodeInfo.ID]
-	return !exists || oldNodeInfo.Weight != newNodeInfo.Weight || !stringMapEqual(oldNodeInfo.Metadata, newNodeInfo.Metadata)
 }
 
 func stringMapEqual(left, right map[string]string) bool {
@@ -763,7 +753,7 @@ func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []No
 	for nodeID, newNodeInfo := range newNodeMap {
 		if currentNode, exists := currentNodeMap[nodeID]; exists {
 			oldNodeInfo, hasOldInfo := currentInfos[nodeID]
-			if currentNode.Address() != newNodeInfo.Address || !hasOldInfo || oldNodeInfo.Weight != newNodeInfo.Weight || !stringMapEqual(oldNodeInfo.Metadata, newNodeInfo.Metadata) {
+			if currentNode.Address() != newNodeInfo.Address || !hasOldInfo || !stringMapEqual(oldNodeInfo.Metadata, newNodeInfo.Metadata) {
 				nodesToUpdate = append(nodesToUpdate, newNodeInfo)
 			}
 		}

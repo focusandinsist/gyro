@@ -56,7 +56,7 @@ func (c *controllableHealthChecker) Emit(nodeID string, healthy bool) {
 	}
 }
 
-func TestHealthAwarePool_CloseStopsProcessorAndRejectsLateEvents(t *testing.T) {
+func TestHealthAwarePoolCloseRejectsLateCallbacks(t *testing.T) {
 	locator, err := NewConsistentLocator(DefaultLocatorConfig())
 	if err != nil {
 		t.Fatalf("failed to create locator: %v", err)
@@ -70,15 +70,8 @@ func TestHealthAwarePool_CloseStopsProcessorAndRejectsLateEvents(t *testing.T) {
 		t.Fatalf("first close failed: %v", err)
 	}
 
-	select {
-	case <-pool.eventDoneCh:
-	default:
-		t.Fatal("pool close did not signal event processor shutdown")
-	}
-
 	// The checker may still deliver a callback after Close because its listener
-	// API is asynchronous. This must be ignored rather than sent to a closed
-	// channel or processed after the pool has been torn down.
+	// API is asynchronous. This must be ignored after the pool is torn down.
 	checker.Emit("late-node", false)
 
 	if err := pool.Close(); err != nil {
@@ -108,7 +101,7 @@ func TestHealthAwarePoolReplaceLocatorSerializesWithClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldNode := NewMockNode("old", "old")
-	if err := base.AddNode(oldNode); err != nil {
+	if err := base.AddNodeContext(context.Background(), oldNode); err != nil {
 		t.Fatal(err)
 	}
 	pool := NewHealthAwarePoolWithChecker(base, &controllableHealthChecker{config: DefaultHealthCheckerConfig()})
@@ -127,7 +120,7 @@ func TestHealthAwarePoolReplaceLocatorSerializesWithClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	newNode := NewMockNode("new", "new")
-	if err := replacement.AddNode(newNode); err != nil {
+	if err := replacement.AddNodeContext(context.Background(), newNode); err != nil {
 		t.Fatal(err)
 	}
 
@@ -174,7 +167,7 @@ func TestHealthAwarePoolSmallClusterFailover(t *testing.T) {
 			}
 			for i := 1; i <= nodeCount; i++ {
 				node := NewMockNode(fmt.Sprintf("node-%d", i), fmt.Sprintf("127.0.0.1:%d", 6378+i))
-				if err := locator.AddNode(node); err != nil {
+				if err := locator.AddNodeContext(context.Background(), node); err != nil {
 					t.Fatalf("AddNode failed: %v", err)
 				}
 			}

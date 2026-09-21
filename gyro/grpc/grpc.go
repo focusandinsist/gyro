@@ -283,7 +283,7 @@ func newGRPCClient(addresses []string, config *GRPCClientConfig, factory *GRPCNo
 			_ = locator.Close()
 			return nil, fmt.Errorf("failed to create node for %s: %w", addr, err)
 		}
-		if err := locator.AddNode(node); err != nil {
+		if err := locator.AddNodeContext(context.Background(), node); err != nil {
 			_ = node.Close()
 			_ = locator.Close()
 			return nil, fmt.Errorf("failed to add node for %s: %w", addr, err)

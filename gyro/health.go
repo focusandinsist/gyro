@@ -406,13 +406,6 @@ func (hc *DefaultHealthChecker) monitoringLoop(run *healthCheckRun, interval tim
 	}
 }
 
-// HealthEvent represents a health status change event
-type HealthEvent struct {
-	NodeID    string
-	Healthy   bool
-	Timestamp time.Time
-}
-
 // HealthAwarePoolStats contains statistics about a health-aware pool
 type HealthAwarePoolStats struct {
 	TotalNodes     int `json:"total_nodes"`
@@ -423,19 +416,16 @@ type HealthAwarePoolStats struct {
 // HealthAwarePool wraps a Locator with health checking capabilities.
 type HealthAwarePool struct {
 	Locator
-	locatorMu       sync.RWMutex
-	monitorMu       sync.Mutex
-	healthChecker   HealthChecker
-	healthyNodes    map[string]bool
-	healthEventChan chan HealthEvent
-	mu              sync.RWMutex
-	closed          bool
-	monitorStarted  bool
-	closeOnce       sync.Once
-	closeErr        error
-	eventDoneCh     chan struct{}
-	processorWG     sync.WaitGroup
-	logger          atomic.Pointer[slog.Logger]
+	locatorMu      sync.RWMutex
+	monitorMu      sync.Mutex
+	healthChecker  HealthChecker
+	healthyNodes   map[string]bool
+	mu             sync.RWMutex
+	closed         bool
+	monitorStarted bool
+	closeOnce      sync.Once
+	closeErr       error
+	logger         atomic.Pointer[slog.Logger]
 }
 
 // NewHealthAwarePool creates a new health-aware locator with a default health checker.
@@ -447,11 +437,9 @@ func NewHealthAwarePool(locator Locator, config HealthCheckerConfig) *HealthAwar
 // NewHealthAwarePoolWithChecker creates a new health-aware locator with an injected health checker.
 func NewHealthAwarePoolWithChecker(locator Locator, healthChecker HealthChecker) *HealthAwarePool {
 	hap := &HealthAwarePool{
-		Locator:         locator,
-		healthChecker:   healthChecker,
-		healthyNodes:    make(map[string]bool),
-		healthEventChan: make(chan HealthEvent, 100),
-		eventDoneCh:     make(chan struct{}),
+		Locator:       locator,
+		healthChecker: healthChecker,
+		healthyNodes:  make(map[string]bool),
 	}
 	hap.logger.Store(discardLogger)
 
@@ -566,7 +554,6 @@ func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 		return
 	}
 	hap.monitorStarted = true
-	hap.processorWG.Add(1)
 	hap.mu.Unlock()
 
 	for _, node := range hap.GetAllNodes() {
@@ -582,48 +569,13 @@ func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 		hap.healthyNodes[nodeID] = healthy
 		hap.mu.Unlock()
 
-		select {
-		case <-hap.eventDoneCh:
-			return
-		case hap.healthEventChan <- HealthEvent{NodeID: nodeID, Healthy: healthy, Timestamp: time.Now()}:
-		default:
-			hap.log().Warn("health event dropped, event channel full", "node_id", nodeID, "healthy", healthy)
-		}
+		hap.log().Info("node health changed", "node_id", nodeID, "healthy", healthy)
 	})
 
 	hap.healthChecker.StartMonitoring(ctx)
-	go func() {
-		defer hap.processorWG.Done()
-		hap.startHealthEventProcessor(ctx)
-	}()
 }
 
-// startHealthEventProcessor processes health events and updates internal state
-func (hap *HealthAwarePool) startHealthEventProcessor(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-hap.eventDoneCh:
-			return
-		case event := <-hap.healthEventChan:
-			hap.processHealthEvent(event)
-		}
-	}
-}
-
-// processHealthEvent handles a single node health transition.
-func (hap *HealthAwarePool) processHealthEvent(event HealthEvent) {
-	hap.log().Info("node health changed", "node_id", event.NodeID, "healthy", event.Healthy)
-
-	// TODO: weighted rebalancing, alerting, and circuit-breaking on this event.
-}
-
-// AddNode adds a node to both the locator and health monitoring.
-func (hap *HealthAwarePool) AddNode(node Node) error {
-	return hap.AddNodeContext(context.Background(), node)
-}
-
+// AddNodeContext adds a node to both the locator and health monitoring.
 func (hap *HealthAwarePool) AddNodeContext(ctx context.Context, node Node) error {
 	if err := hap.currentLocator().AddNodeContext(ctx, node); err != nil {
 		return err
@@ -638,11 +590,7 @@ func (hap *HealthAwarePool) AddNodeContext(ctx context.Context, node Node) error
 	return nil
 }
 
-// RemoveNode removes a node from both the locator and health monitoring.
-func (hap *HealthAwarePool) RemoveNode(nodeID string) error {
-	return hap.RemoveNodeContext(context.Background(), nodeID)
-}
-
+// RemoveNodeContext removes a node from both the locator and health monitoring.
 func (hap *HealthAwarePool) RemoveNodeContext(ctx context.Context, nodeID string) error {
 	if err := hap.currentLocator().RemoveNodeContext(ctx, nodeID); err != nil {
 		return err
@@ -739,7 +687,7 @@ func (hap *HealthAwarePool) GetStats() HealthAwarePoolStats {
 }
 
 // ReplaceLocator atomically switches the pool to a fully built locator. The
-// existing health checker and event processor remain attached to the pool, so
+// existing health checker remains attached to the pool, so
 // health-based failover continues across the replacement. Nodes removed from
 // the topology are detached from the checker before the old locator closes.
 func (hap *HealthAwarePool) ReplaceLocator(newLocator Locator) error {
@@ -810,24 +758,13 @@ func (hap *HealthAwarePool) Close() error {
 		defer hap.monitorMu.Unlock()
 		hap.mu.Lock()
 		hap.closed = true
-		close(hap.eventDoneCh)
 		hap.mu.Unlock()
 
-		// The health checker invokes listeners asynchronously. Stop producing
-		// new events first, then wait for the event processor. The event data
-		// channel intentionally remains open because an in-flight listener may
-		// still hold a reference to it after Close returns.
+		// The health checker invokes listeners asynchronously. Mark the pool
+		// closed before stopping the checker so late callbacks are ignored.
 		hap.StopHealthMonitoring()
-		hap.processorWG.Wait()
 		hap.closeErr = hap.currentLocator().Close()
 	})
 
 	return hap.closeErr
-}
-
-// LoadBalancer provides load balancing strategies for node selection.
-// Unused for now.
-type LoadBalancer interface {
-	Select(ctx context.Context, nodes []Node, key string) (Node, error)
-	UpdateStats(nodeID string, latency time.Duration, success bool)
 }

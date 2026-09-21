@@ -23,9 +23,7 @@ var ErrLocatorClosed = errors.New("locator is closed")
 type Locator interface {
 	Get(ctx context.Context, key string) (Node, error)
 	GetReplicas(ctx context.Context, key string, count int) ([]Node, error)
-	AddNode(node Node) error
 	AddNodeContext(ctx context.Context, node Node) error
-	RemoveNode(nodeID string) error
 	RemoveNodeContext(ctx context.Context, nodeID string) error
 	GetAllNodes() []Node
 	Close() error
@@ -179,11 +177,6 @@ func (cl *ConsistentLocator) GetReplicas(ctx context.Context, key string, count 
 	return replicas, nil
 }
 
-// AddNode adds a new node to the locator.
-func (cl *ConsistentLocator) AddNode(node Node) error {
-	return cl.AddNodeContext(context.Background(), node)
-}
-
 // AddNodeContext adds a node while honoring the caller's cancellation and
 // deadline during ring rebalancing.
 func (cl *ConsistentLocator) AddNodeContext(ctx context.Context, node Node) error {
@@ -216,11 +209,6 @@ func (cl *ConsistentLocator) AddNodeContext(ctx context.Context, node Node) erro
 	cl.nodes[nodeID] = node
 
 	return nil
-}
-
-// RemoveNode removes a node from the locator.
-func (cl *ConsistentLocator) RemoveNode(nodeID string) error {
-	return cl.RemoveNodeContext(context.Background(), nodeID)
 }
 
 // RemoveNodeContext removes a node while honoring the caller's cancellation

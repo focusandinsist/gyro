@@ -346,3 +346,38 @@ func TestClientTopologyReconcileDoesNotHoldStateLockDuringNodeIO(t *testing.T) {
 		t.Fatal("Client held its state lock while rebuilding nodes on restart")
 	}
 }
+
+func TestClientTopologyReconcileRebuildsNodeWhenMetadataChanges(t *testing.T) {
+	config := DefaultClientConfig()
+	config.HealthChecker.Enabled = false
+	factory := NewMockNodeFactory()
+	client, err := NewClient(
+		"metadata-change-service",
+		NewMockServiceDiscovery([]NodeInfo{{
+			ID: "node-1", Address: "node-1", Metadata: map[string]string{"zone": "a"},
+		}}),
+		NewConfigManager(config),
+		factory,
+		NewDefaultHealthChecker(config.HealthChecker),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	oldNode := factory.GetMockNode("node-1")
+	client.handleServiceNodesChange(context.Background(), []NodeInfo{{
+		ID: "node-1", Address: "node-1", Metadata: map[string]string{"zone": "b"},
+	}})
+
+	newNode := factory.GetMockNode("node-1")
+	if newNode == oldNode {
+		t.Fatal("metadata change did not rebuild the node")
+	}
+	if oldNode.IsHealthy(context.Background()) {
+		t.Fatal("metadata change did not close the replaced node")
+	}
+}
