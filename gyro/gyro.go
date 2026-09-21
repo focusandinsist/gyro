@@ -114,16 +114,20 @@ func (ssd *StaticServiceDiscovery) Watch(ctx context.Context, serviceName string
 	go func() {
 		defer func() {
 			ssd.mu.Lock()
+			removed := false
 			if watchers, exists := ssd.watchers[serviceName]; exists {
 				for i, watcher := range watchers {
 					if watcher == ch {
 						ssd.watchers[serviceName] = append(watchers[:i], watchers[i+1:]...)
+						removed = true
 						break
 					}
 				}
 			}
+			if removed {
+				close(ch)
+			}
 			ssd.mu.Unlock()
-			close(ch)
 		}()
 
 		<-ctx.Done()
@@ -347,22 +351,21 @@ func (c *Client) log() *slog.Logger {
 	return c.logger.Load()
 }
 
-// buildLocatorUnsafe builds a locator from a configuration snapshot (caller
-// must hold c.mu). It does not publish the locator to the client, so callers
-// can validate the complete replacement before changing live state.
-func (c *Client) buildLocatorUnsafe(config *ClientConfig, nodeFactory NodeFactory) (Locator, error) {
+// buildLocatorUnsafe builds a locator from a configuration snapshot without
+// publishing it. Discovery and node construction happen outside Client locks.
+func (c *Client) buildLocatorUnsafe(config *ClientConfig, nodeFactory NodeFactory) (Locator, []NodeInfo, error) {
 	ctx := context.Background()
 
 	nodeInfos, err := c.discovery.Discover(ctx, c.serviceName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to discover initial nodes: %w", err)
+		return nil, nil, fmt.Errorf("failed to discover initial nodes: %w", err)
 	}
 	nodeInfos = cloneNodeInfos(nodeInfos)
 	sortNodeInfosByID(nodeInfos)
 
 	baseLocator, err := NewConsistentLocator(config.Locator)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create locator: %w", err)
+		return nil, nil, fmt.Errorf("failed to create locator: %w", err)
 	}
 	baseLocator.SetLogger(c.log())
 	committed := false
@@ -375,45 +378,48 @@ func (c *Client) buildLocatorUnsafe(config *ClientConfig, nodeFactory NodeFactor
 	for _, nodeInfo := range nodeInfos {
 		node, err := nodeFactory.CreateNode(nodeInfo)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create node %s: %w", nodeInfo.ID, err)
+			return nil, nil, fmt.Errorf("failed to create node %s: %w", nodeInfo.ID, err)
 		}
 
 		if err := baseLocator.AddNode(node); err != nil {
 			_ = node.Close()
-			return nil, fmt.Errorf("failed to add node %s to locator: %w", nodeInfo.ID, err)
+			return nil, nil, fmt.Errorf("failed to add node %s to locator: %w", nodeInfo.ID, err)
 		}
 	}
 	committed = true
-	if c.locator == nil {
-		c.nodeInfos = make(map[string]NodeInfo)
-		for _, nodeInfo := range nodeInfos {
-			c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
-		}
-	}
-	return baseLocator, nil
+	return baseLocator, nodeInfos, nil
 }
 
-// initializeUnsafe initializes the client with current service nodes (caller
-// must hold c.mu).
-func (c *Client) initializeUnsafe() error {
+// initialize prepares a complete pool without holding the client state lock,
+// then publishes it with a short state transition.
+func (c *Client) initialize() error {
 	config := c.configManager.GetConfig()
-	baseLocator, err := c.buildLocatorUnsafe(config, c.nodeFactory)
+	c.mu.RLock()
+	nodeFactory := c.nodeFactory
+	healthChecker := c.healthChecker
+	c.mu.RUnlock()
+	baseLocator, nodeInfos, err := c.buildLocatorUnsafe(config, nodeFactory)
 	if err != nil {
 		return err
 	}
 
-	healthAwarePool := NewHealthAwarePoolWithChecker(baseLocator, c.healthChecker)
+	healthAwarePool := NewHealthAwarePoolWithChecker(baseLocator, healthChecker)
 	healthAwarePool.SetLogger(c.log())
+
+	c.mu.Lock()
+	if c.locator != nil {
+		c.mu.Unlock()
+		_ = healthAwarePool.Close()
+		return nil
+	}
 	c.locator = healthAwarePool
+	c.nodeInfos = make(map[string]NodeInfo, len(nodeInfos))
+	for _, nodeInfo := range nodeInfos {
+		c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
+	}
+	c.mu.Unlock()
 
 	return nil
-}
-
-// initialize initializes the client with current service nodes.
-func (c *Client) initialize() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.initializeUnsafe()
 }
 
 // getLocator returns the underlying locator
@@ -460,22 +466,29 @@ func (c *Client) Start(ctx context.Context) error {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 
-	c.mu.Lock()
-	if c.running {
-		c.mu.Unlock()
+	c.mu.RLock()
+	running := c.running
+	locator := c.locator
+	c.mu.RUnlock()
+	if running {
 		return fmt.Errorf("client is already running")
 	}
 
 	// Stop releases the locator so a later Start can create a fresh run with
 	// new node connections and a new HealthAwarePool.
-	if c.locator == nil {
-		if err := c.initializeUnsafe(); err != nil {
-			c.mu.Unlock()
+	if locator == nil {
+		if err := c.initialize(); err != nil {
 			return fmt.Errorf("failed to initialize client for start: %w", err)
 		}
 	}
 
 	runCtx, runCancel := context.WithCancel(ctx)
+	c.mu.Lock()
+	if c.running {
+		c.mu.Unlock()
+		runCancel()
+		return fmt.Errorf("client is already running")
+	}
 	c.runCancel = runCancel
 	c.running = true
 	registerConfigWatcher := !c.configWatcher
@@ -691,24 +704,35 @@ func (c *Client) processServiceWatch(ctx context.Context, nodesCh <-chan []NodeI
 
 // handleServiceNodesChange handles changes in service nodes with incremental updates.
 func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []NodeInfo) {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.nodeInfos == nil {
 		c.nodeInfos = make(map[string]NodeInfo)
 	}
 
 	if !c.running {
+		c.mu.Unlock()
 		return
 	}
 
 	if c.locator == nil {
-		if err := c.initializeUnsafe(); err != nil {
-			c.log().Error("failed to initialize locator after node change", "error", err)
-		}
+		c.mu.Unlock()
+		c.log().Error("locator is nil, cannot apply incremental update")
 		return
 	}
 
-	currentNodes := c.getPoolNodes()
+	locator := c.locator
+	healthChecker := c.healthChecker
+	nodeFactory := c.nodeFactory
+	currentNodes := locator.GetAllNodes()
+	currentInfos := make(map[string]NodeInfo, len(c.nodeInfos))
+	for nodeID, nodeInfo := range c.nodeInfos {
+		currentInfos[nodeID] = cloneNodeInfo(nodeInfo)
+	}
+	c.mu.Unlock()
+
 	currentNodeMap := make(map[string]Node)
 	for _, node := range currentNodes {
 		currentNodeMap[node.ID()] = node
@@ -738,44 +762,40 @@ func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []No
 	var nodesToUpdate []NodeInfo
 	for nodeID, newNodeInfo := range newNodeMap {
 		if currentNode, exists := currentNodeMap[nodeID]; exists {
-			if c.nodeNeedsUpdate(currentNode, newNodeInfo) {
+			oldNodeInfo, hasOldInfo := currentInfos[nodeID]
+			if currentNode.Address() != newNodeInfo.Address || !hasOldInfo || oldNodeInfo.Weight != newNodeInfo.Weight || !stringMapEqual(oldNodeInfo.Metadata, newNodeInfo.Metadata) {
 				nodesToUpdate = append(nodesToUpdate, newNodeInfo)
 			}
 		}
 	}
 	sortNodeInfosByID(nodesToUpdate)
 
-	locator := c.getLocator()
-	if locator == nil {
-		c.log().Error("locator is nil, cannot apply incremental update")
-		return
-	}
-
 	for _, nodeID := range nodesToRemove {
 		if err := locator.RemoveNodeContext(ctx, nodeID); err != nil {
 			c.log().Error("failed to remove node", "node_id", nodeID, "error", err)
 		} else {
-			delete(c.nodeInfos, nodeID)
-			if c.healthChecker != nil {
-				c.healthChecker.RemoveNode(nodeID)
+			delete(currentInfos, nodeID)
+			if healthChecker != nil {
+				healthChecker.RemoveNode(nodeID)
 			}
 			c.log().Info("node removed", "node_id", nodeID)
 		}
 	}
 
 	for _, nodeInfo := range nodesToAdd {
-		node, err := c.nodeFactory.CreateNode(nodeInfo)
+		node, err := nodeFactory.CreateNode(nodeInfo)
 		if err != nil {
 			c.log().Error("failed to create node", "node_id", nodeInfo.ID, "error", err)
 			continue
 		}
 
 		if err := locator.AddNodeContext(ctx, node); err != nil {
+			_ = node.Close()
 			c.log().Error("failed to add node", "node_id", nodeInfo.ID, "error", err)
 		} else {
-			c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
-			if c.healthChecker != nil {
-				c.healthChecker.AddNode(node)
+			currentInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
+			if healthChecker != nil {
+				healthChecker.AddNode(node)
 			}
 			c.log().Info("node added", "node_id", nodeInfo.ID)
 		}
@@ -786,22 +806,23 @@ func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []No
 			c.log().Error("failed to remove node for update", "node_id", nodeInfo.ID, "error", err)
 			continue
 		}
-		if c.healthChecker != nil {
-			c.healthChecker.RemoveNode(nodeInfo.ID)
+		if healthChecker != nil {
+			healthChecker.RemoveNode(nodeInfo.ID)
 		}
 
-		node, err := c.nodeFactory.CreateNode(nodeInfo)
+		node, err := nodeFactory.CreateNode(nodeInfo)
 		if err != nil {
 			c.log().Error("failed to create updated node", "node_id", nodeInfo.ID, "error", err)
 			continue
 		}
 
 		if err := locator.AddNodeContext(ctx, node); err != nil {
+			_ = node.Close()
 			c.log().Error("failed to add updated node", "node_id", nodeInfo.ID, "error", err)
 		} else {
-			c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
-			if c.healthChecker != nil {
-				c.healthChecker.AddNode(node)
+			currentInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
+			if healthChecker != nil {
+				healthChecker.AddNode(node)
 			}
 			c.log().Info("node updated", "node_id", nodeInfo.ID)
 		}
@@ -809,6 +830,12 @@ func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []No
 
 	c.log().Info("incremental update completed",
 		"added", len(nodesToAdd), "removed", len(nodesToRemove), "updated", len(nodesToUpdate))
+
+	c.mu.Lock()
+	if c.running && c.locator == locator {
+		c.nodeInfos = currentInfos
+	}
+	c.mu.Unlock()
 }
 
 // handleConfigChange handles configuration changes with incremental updates.
@@ -816,10 +843,12 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.running || c.locator == nil {
+	c.mu.RLock()
+	running := c.running
+	activeLocator := c.locator
+	currentFactory := c.nodeFactory
+	c.mu.RUnlock()
+	if !running || activeLocator == nil {
 		return nil
 	}
 
@@ -828,14 +857,15 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 	healthCheckerChanged := !c.healthCheckerConfigEqual(oldConfig.HealthChecker, newConfig.HealthChecker)
 
 	var (
-		replacementLocator Locator
-		replacementFactory NodeFactory
+		replacementLocator   Locator
+		replacementFactory   NodeFactory
+		replacementNodeInfos []NodeInfo
 	)
 
 	if locatorChanged || connectionChanged {
-		replacementFactory = c.nodeFactory
+		replacementFactory = currentFactory
 		if connectionChanged {
-			configurableFactory, ok := c.nodeFactory.(ConnectionConfigurableNodeFactory)
+			configurableFactory, ok := currentFactory.(ConnectionConfigurableNodeFactory)
 			if !ok {
 				return fmt.Errorf("node factory does not support connection configuration updates")
 			}
@@ -848,7 +878,7 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 		}
 
 		var err error
-		replacementLocator, err = c.buildLocatorUnsafe(newConfig, replacementFactory)
+		replacementLocator, replacementNodeInfos, err = c.buildLocatorUnsafe(newConfig, replacementFactory)
 		if err != nil {
 			return fmt.Errorf("failed to build replacement locator: %w", err)
 		}
@@ -865,7 +895,7 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 	}
 
 	if replacementLocator != nil {
-		healthAwarePool, ok := c.locator.(*HealthAwarePool)
+		healthAwarePool, ok := activeLocator.(*HealthAwarePool)
 		if !ok {
 			_ = replacementLocator.Close()
 			return fmt.Errorf("active locator does not support atomic replacement")
@@ -881,7 +911,15 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 			return fmt.Errorf("failed to replace active locator: %w", err)
 		}
 
-		c.nodeFactory = replacementFactory
+		c.mu.Lock()
+		if c.running && c.locator == activeLocator {
+			c.nodeFactory = replacementFactory
+			c.nodeInfos = make(map[string]NodeInfo, len(replacementNodeInfos))
+			for _, nodeInfo := range replacementNodeInfos {
+				c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
+			}
+		}
+		c.mu.Unlock()
 		c.log().Info("client locator replaced after configuration change",
 			"locator_changed", locatorChanged, "connection_changed", connectionChanged)
 	}

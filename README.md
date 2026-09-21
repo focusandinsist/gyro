@@ -6,7 +6,7 @@ Gyro 是一个基于一致性哈希的 Go 客户端侧分片中间件（client-s
 
 - **一致性哈希 + 固定分区**：默认 271 个分区、20 个虚拟节点,新增/删除节点时只重新分配受影响的分区(增量重平衡),而不是推倒重建整张哈希环。
 - **健康检查**:内置主动探测(可配置故障/恢复阈值、并发 worker pool)。
-- **服务发现 + 配置热更新**:节点列表或配置变化时做增量 diff 应用,不整体重建连接。
+- **服务发现 + 配置热更新**:节点列表变化时做增量 diff；locator 或 connection 配置变化时先构建替换资源,成功后切换并关闭旧资源。
 - **协议适配层**:核心抽象是 `Node`/`Locator`/`HealthChecker`,内置 Redis(`github.com/redis/go-redis/v9`)和 gRPC(`google.golang.org/grpc`)两个适配器,拿到的是真实的原生客户端(`*redis.Client` / `*grpc.ClientConn`),接口全部对外暴露,不做二次封装。
 
 ## 快速开始
@@ -96,7 +96,6 @@ gyro/
 ├── gyro/                  # 核心:Locator(一致性哈希路由)、HealthChecker、ConfigManager、ServiceDiscovery
 │   ├── redis/             # Redis 适配器(go-redis)
 │   └── grpc/              # gRPC 适配器(grpc-go)
-├── test/integration/      # 基于 fake server 的集成测试
 └── docs/                  # 详细文档
 ```
 

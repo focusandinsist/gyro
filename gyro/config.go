@@ -9,6 +9,7 @@ import (
 // ConfigManager manages configuration updates.
 type ConfigManager struct {
 	mu       sync.RWMutex
+	updateMu sync.Mutex
 	config   *ClientConfig
 	watchers []ConfigWatcher
 }
@@ -78,6 +79,13 @@ func (cm *ConfigManager) UpdateConfig(newConfig *ClientConfig) error {
 	if newConfig == nil {
 		return fmt.Errorf("new config cannot be nil")
 	}
+
+	// Watchers prepare external resources, so they cannot run under cm.mu.
+	// Serialize the full prepare/commit transaction separately to prevent two
+	// updates from validating against the same old snapshot and committing out
+	// of order.
+	cm.updateMu.Lock()
+	defer cm.updateMu.Unlock()
 
 	cm.mu.RLock()
 	oldConfig := cloneClientConfig(cm.config)

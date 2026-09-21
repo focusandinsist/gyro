@@ -18,6 +18,8 @@ type Node interface {
 	Close() error
 }
 
+var ErrLocatorClosed = errors.New("locator is closed")
+
 type Locator interface {
 	Get(ctx context.Context, key string) (Node, error)
 	GetReplicas(ctx context.Context, key string, count int) ([]Node, error)
@@ -57,6 +59,7 @@ type ConsistentLocator struct {
 	nodes  map[string]Node
 	ring   hashRing
 	config LocatorConfig
+	closed bool
 	logger atomic.Pointer[slog.Logger]
 }
 
@@ -122,6 +125,9 @@ func (cl *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) 
 	cl.mu.RLock()
 	defer cl.mu.RUnlock()
 
+	if cl.closed {
+		return nil, ErrLocatorClosed
+	}
 	if len(cl.nodes) == 0 {
 		return nil, fmt.Errorf("no nodes available in ring")
 	}
@@ -147,6 +153,9 @@ func (cl *ConsistentLocator) GetReplicas(ctx context.Context, key string, count 
 	cl.mu.RLock()
 	defer cl.mu.RUnlock()
 
+	if cl.closed {
+		return nil, ErrLocatorClosed
+	}
 	if len(cl.nodes) == 0 {
 		return nil, fmt.Errorf("no nodes available in locator")
 	}
@@ -193,6 +202,9 @@ func (cl *ConsistentLocator) AddNodeContext(ctx context.Context, node Node) erro
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 
+	if cl.closed {
+		return ErrLocatorClosed
+	}
 	if _, exists := cl.nodes[nodeID]; exists {
 		return fmt.Errorf("node %s already exists in locator", nodeID)
 	}
@@ -222,6 +234,10 @@ func (cl *ConsistentLocator) RemoveNodeContext(ctx context.Context, nodeID strin
 	}
 
 	cl.mu.Lock()
+	if cl.closed {
+		cl.mu.Unlock()
+		return ErrLocatorClosed
+	}
 	nodeToClose, exists := cl.nodes[nodeID]
 	if !exists {
 		cl.mu.Unlock()
@@ -257,14 +273,19 @@ func (cl *ConsistentLocator) GetAllNodes() []Node {
 
 // Close closes all connections and releases resources.
 func (cl *ConsistentLocator) Close() error {
-	cl.mu.Lock()
-	nodes := cl.nodes
-	cl.nodes = make(map[string]Node)
 	newRing, err := newHashRing(cl.config)
 	if err != nil {
-		cl.mu.Unlock()
 		return fmt.Errorf("failed to reset closed locator ring: %w", err)
 	}
+
+	cl.mu.Lock()
+	if cl.closed {
+		cl.mu.Unlock()
+		return nil
+	}
+	cl.closed = true
+	nodes := cl.nodes
+	cl.nodes = make(map[string]Node)
 	cl.ring = newRing
 	cl.mu.Unlock()
 

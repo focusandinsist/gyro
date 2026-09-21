@@ -3,6 +3,7 @@ package gyro
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -270,4 +271,78 @@ func waitForNodeChecks(t *testing.T, node *MockNode, minimum int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("node %s did not receive %d health checks", node.ID(), minimum)
+}
+
+type clientLockCheckingFactory struct {
+	client   *Client
+	lockHeld atomic.Bool
+}
+
+func (f *clientLockCheckingFactory) CreateNode(info NodeInfo) (Node, error) {
+	if f.client != nil {
+		if !f.client.mu.TryLock() {
+			f.lockHeld.Store(true)
+		} else {
+			f.client.mu.Unlock()
+		}
+	}
+	return &clientLockCheckingNode{Node: NewMockNode(info.ID, info.Address), factory: f}, nil
+}
+
+type clientLockCheckingNode struct {
+	Node
+	factory *clientLockCheckingFactory
+}
+
+func (n *clientLockCheckingNode) Close() error {
+	if n.factory.client != nil {
+		if !n.factory.client.mu.TryLock() {
+			n.factory.lockHeld.Store(true)
+		} else {
+			n.factory.client.mu.Unlock()
+		}
+	}
+	return n.Node.Close()
+}
+
+func TestClientTopologyReconcileDoesNotHoldStateLockDuringNodeIO(t *testing.T) {
+	config := DefaultClientConfig()
+	config.HealthChecker.Enabled = false
+	factory := &clientLockCheckingFactory{}
+	client, err := NewClient(
+		"lock-boundary-service",
+		NewMockServiceDiscovery([]NodeInfo{{ID: "node-1", Address: "node-1"}}),
+		NewConfigManager(config),
+		factory,
+		NewDefaultHealthChecker(config.HealthChecker),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory.client = client
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	client.handleServiceNodesChange(context.Background(), []NodeInfo{
+		{ID: "node-1", Address: "node-1"},
+		{ID: "node-2", Address: "node-2"},
+	})
+	client.handleServiceNodesChange(context.Background(), []NodeInfo{
+		{ID: "node-2", Address: "node-2"},
+	})
+
+	if factory.lockHeld.Load() {
+		t.Fatal("Client held its state lock during node creation or close")
+	}
+	if err := client.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if factory.lockHeld.Load() {
+		t.Fatal("Client held its state lock while rebuilding nodes on restart")
+	}
 }

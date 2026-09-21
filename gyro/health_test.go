@@ -86,6 +86,74 @@ func TestHealthAwarePool_CloseStopsProcessorAndRejectsLateEvents(t *testing.T) {
 	}
 }
 
+type blockingGetAllLocator struct {
+	Locator
+	started chan struct{}
+	release chan struct{}
+}
+
+func (l *blockingGetAllLocator) GetAllNodes() []Node {
+	select {
+	case <-l.started:
+	default:
+		close(l.started)
+	}
+	<-l.release
+	return l.Locator.GetAllNodes()
+}
+
+func TestHealthAwarePoolReplaceLocatorSerializesWithClose(t *testing.T) {
+	base, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldNode := NewMockNode("old", "old")
+	if err := base.AddNode(oldNode); err != nil {
+		t.Fatal(err)
+	}
+	pool := NewHealthAwarePoolWithChecker(base, &controllableHealthChecker{config: DefaultHealthCheckerConfig()})
+
+	blocking := &blockingGetAllLocator{
+		Locator: pool.currentLocator(),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	pool.locatorMu.Lock()
+	pool.Locator = blocking
+	pool.locatorMu.Unlock()
+
+	replacement, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	newNode := NewMockNode("new", "new")
+	if err := replacement.AddNode(newNode); err != nil {
+		t.Fatal(err)
+	}
+
+	replaceDone := make(chan error, 1)
+	go func() { replaceDone <- pool.ReplaceLocator(replacement) }()
+	select {
+	case <-blocking.started:
+	case <-time.After(time.Second):
+		t.Fatal("ReplaceLocator did not start reading the old locator")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- pool.Close() }()
+	close(blocking.release)
+
+	if err := <-replaceDone; err != nil {
+		t.Fatalf("ReplaceLocator failed: %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if newNode.IsHealthy(context.Background()) {
+		t.Fatal("replacement node remained open after concurrent pool Close")
+	}
+}
+
 func TestHealthAwarePoolSmallClusterFailover(t *testing.T) {
 	t.Run("0_nodes", func(t *testing.T) {
 		locator, err := NewConsistentLocator(DefaultLocatorConfig())
@@ -210,6 +278,22 @@ func TestDefaultHealthChecker_FailureThreshold(t *testing.T) {
 		if event.Healthy {
 			t.Error("Expected unhealthy event")
 		}
+	}
+}
+
+func TestDefaultHealthCheckerAddNodeKeepsLastCheckTimeZero(t *testing.T) {
+	checker := NewDefaultHealthChecker(DefaultHealthCheckerConfig())
+	checker.AddNode(NewMockNode("unprobed", "127.0.0.1:6379"))
+
+	stats := checker.GetNodeStats("unprobed")
+	if stats == nil {
+		t.Fatal("missing stats for added node")
+	}
+	if !stats.LastCheckTime.IsZero() {
+		t.Fatalf("LastCheckTime = %v before first probe, want zero", stats.LastCheckTime)
+	}
+	if got := checker.LastCheckTime(); !got.IsZero() {
+		t.Fatalf("checker LastCheckTime = %v before first probe, want zero", got)
 	}
 }
 

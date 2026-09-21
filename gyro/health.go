@@ -206,8 +206,7 @@ func (hc *DefaultHealthChecker) AddNode(node Node) {
 
 	if _, exists := hc.nodeStats[nodeID]; !exists {
 		hc.nodeStats[nodeID] = &NodeHealthStats{
-			IsHealthy:     true,
-			LastCheckTime: time.Now(),
+			IsHealthy: true,
 		}
 	}
 }
@@ -747,6 +746,12 @@ func (hap *HealthAwarePool) ReplaceLocator(newLocator Locator) error {
 	if newLocator == nil {
 		return fmt.Errorf("new locator cannot be nil")
 	}
+
+	// Close and replacement are one lifecycle transaction. Close waits for a
+	// replacement already in progress, while a replacement that starts after
+	// Close observes the closed flag and is rejected before publication.
+	hap.monitorMu.Lock()
+	defer hap.monitorMu.Unlock()
 
 	hap.mu.RLock()
 	closed := hap.closed

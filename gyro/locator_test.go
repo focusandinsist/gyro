@@ -406,8 +406,8 @@ func TestConsistentLocator_CloseDoesNotHoldLockDuringNodeClose(t *testing.T) {
 	go func() { operationDone <- locator.AddNode(NewMockNode("new", "new")) }()
 	select {
 	case err := <-operationDone:
-		if err != nil {
-			t.Fatalf("AddNode while Close was closing detached node failed: %v", err)
+		if !errors.Is(err, ErrLocatorClosed) {
+			t.Fatalf("AddNode while Close was closing detached node error = %v, want ErrLocatorClosed", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("locator lock was held while node Close blocked")
@@ -415,5 +415,38 @@ func TestConsistentLocator_CloseDoesNotHoldLockDuringNodeClose(t *testing.T) {
 	close(node.release)
 	if err := <-closeDone; err != nil {
 		t.Fatalf("Close failed: %v", err)
+	}
+}
+
+func TestConsistentLocatorRejectsOperationsAfterClose(t *testing.T) {
+	locator, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := NewMockNode("node", "node")
+	if err := locator.AddNode(node); err != nil {
+		t.Fatal(err)
+	}
+	if err := locator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := locator.Close(); err != nil {
+		t.Fatalf("repeated Close failed: %v", err)
+	}
+
+	if _, err := locator.Get(context.Background(), "key"); !errors.Is(err, ErrLocatorClosed) {
+		t.Fatalf("Get error = %v, want ErrLocatorClosed", err)
+	}
+	if _, err := locator.GetReplicas(context.Background(), "key", 1); !errors.Is(err, ErrLocatorClosed) {
+		t.Fatalf("GetReplicas error = %v, want ErrLocatorClosed", err)
+	}
+	if err := locator.AddNode(NewMockNode("new", "new")); !errors.Is(err, ErrLocatorClosed) {
+		t.Fatalf("AddNode error = %v, want ErrLocatorClosed", err)
+	}
+	if err := locator.RemoveNode(node.ID()); !errors.Is(err, ErrLocatorClosed) {
+		t.Fatalf("RemoveNode error = %v, want ErrLocatorClosed", err)
+	}
+	if got := locator.GetAllNodes(); len(got) != 0 {
+		t.Fatalf("GetAllNodes after Close returned %d nodes, want 0", len(got))
 	}
 }
