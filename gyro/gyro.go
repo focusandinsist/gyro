@@ -24,10 +24,16 @@ type NodeInfo struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-// ServiceDiscovery provides service discovery capabilities.
+// ServiceDiscovery provides the read-side service discovery capabilities used
+// by Client. Registration is optional and is exposed separately through
+// ServiceRegistrar.
 type ServiceDiscovery interface {
 	Discover(ctx context.Context, serviceName string) ([]NodeInfo, error)
 	Watch(ctx context.Context, serviceName string) (<-chan []NodeInfo, error)
+}
+
+// ServiceRegistrar provides optional service registration capabilities.
+type ServiceRegistrar interface {
 	Register(ctx context.Context, serviceName string, node NodeInfo) error
 	Unregister(ctx context.Context, serviceName string, nodeID string) error
 }
@@ -1012,7 +1018,11 @@ func (c *Client) updateHealthCheckerConfig(newConfig HealthCheckerConfig) error 
 		return fmt.Errorf("invalid health checker config: %w", err)
 	}
 
-	if err := c.healthChecker.UpdateConfig(newConfig); err != nil {
+	checker, ok := c.healthChecker.(ConfigurableHealthChecker)
+	if !ok {
+		return fmt.Errorf("health checker does not support runtime configuration")
+	}
+	if err := checker.UpdateConfig(newConfig); err != nil {
 		return fmt.Errorf("failed to update health checker config: %w", err)
 	}
 

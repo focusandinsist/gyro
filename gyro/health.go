@@ -21,6 +21,13 @@ type HealthChecker interface {
 	StopMonitoring()
 	IsNodeHealthy(nodeID string) bool
 	AddHealthListener(listener HealthListener)
+}
+
+// ConfigurableHealthChecker optionally supports runtime configuration changes.
+// HealthChecker implementations that do not need dynamic configuration do not
+// need to implement this interface.
+type ConfigurableHealthChecker interface {
+	HealthChecker
 	UpdateConfig(newConfig HealthCheckerConfig) error
 	GetConfig() HealthCheckerConfig
 	IsEnabled() bool
@@ -612,12 +619,20 @@ func (hap *HealthAwarePool) StopHealthMonitoring() {
 
 // UpdateHealthCheckerConfig updates the health checker configuration dynamically
 func (hap *HealthAwarePool) UpdateHealthCheckerConfig(newConfig HealthCheckerConfig) error {
-	return hap.healthChecker.UpdateConfig(newConfig)
+	checker, ok := hap.healthChecker.(ConfigurableHealthChecker)
+	if !ok {
+		return fmt.Errorf("health checker does not support runtime configuration")
+	}
+	return checker.UpdateConfig(newConfig)
 }
 
 // GetHealthCheckerConfig returns the current health checker configuration
 func (hap *HealthAwarePool) GetHealthCheckerConfig() HealthCheckerConfig {
-	return hap.healthChecker.GetConfig()
+	checker, ok := hap.healthChecker.(ConfigurableHealthChecker)
+	if !ok {
+		return HealthCheckerConfig{}
+	}
+	return checker.GetConfig()
 }
 
 // GetHealthyNodeCount returns the number of currently healthy nodes
