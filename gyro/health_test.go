@@ -252,8 +252,11 @@ func TestDefaultHealthChecker_FailureThreshold(t *testing.T) {
 		t.Error("Node should be unhealthy after 3 failures (threshold=3)")
 	}
 
-	// Give some time for async health listener to be called
-	time.Sleep(10 * time.Millisecond)
+	listenerContext, cancelListener := context.WithTimeout(context.Background(), time.Second)
+	defer cancelListener()
+	if !listener.WaitForEvents(1, listenerContext) {
+		t.Fatal("health listener did not receive the unhealthy event")
+	}
 
 	// Verify health listener was triggered
 	events := listener.GetEvents()
@@ -285,6 +288,74 @@ func TestDefaultHealthCheckerAddNodeKeepsLastCheckTimeZero(t *testing.T) {
 	}
 	if got := checker.LastCheckTime(); !got.IsZero() {
 		t.Fatalf("checker LastCheckTime = %v before first probe, want zero", got)
+	}
+}
+
+type blockingProbeNode struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (n *blockingProbeNode) ID() string      { return "blocking" }
+func (n *blockingProbeNode) Address() string { return "blocking" }
+func (n *blockingProbeNode) Close() error    { return nil }
+func (n *blockingProbeNode) IsHealthy(context.Context) bool {
+	close(n.started)
+	<-n.release
+	return true
+}
+
+func TestDefaultHealthCheckerLastCheckTimeWaitsForProbeCompletion(t *testing.T) {
+	checker := NewDefaultHealthChecker(DefaultHealthCheckerConfig())
+	node := &blockingProbeNode{started: make(chan struct{}), release: make(chan struct{})}
+	checker.AddNode(node)
+
+	done := make(chan struct{})
+	go func() {
+		checker.Check(context.Background(), node)
+		close(done)
+	}()
+	select {
+	case <-node.started:
+	case <-time.After(time.Second):
+		t.Fatal("probe did not start")
+	}
+	if stats := checker.GetNodeStats(node.ID()); stats == nil || !stats.LastCheckTime.IsZero() {
+		t.Fatalf("LastCheckTime changed before probe completion: %#v", stats)
+	}
+	close(node.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("probe did not complete")
+	}
+	if stats := checker.GetNodeStats(node.ID()); stats == nil || stats.LastCheckTime.IsZero() {
+		t.Fatalf("LastCheckTime was not recorded after probe completion: %#v", stats)
+	}
+}
+
+func TestHealthAwarePoolRemoveNodeClearsHealthSnapshot(t *testing.T) {
+	locator, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := NewMockNode("remove-me", "remove-me")
+	if err := locator.AddNodeContext(context.Background(), node); err != nil {
+		t.Fatal(err)
+	}
+	pool := NewHealthAwarePoolWithChecker(locator, &controllableHealthChecker{config: DefaultHealthCheckerConfig()})
+	if err := pool.RemoveNodeContext(context.Background(), node.ID()); err != nil {
+		t.Fatal(err)
+	}
+	status := pool.GetHealthStatus()
+	if _, exists := status[node.ID()]; exists {
+		t.Fatalf("removed node remained in health snapshot: %#v", status)
+	}
+	if stats := pool.GetStats(); stats.TotalNodes != 0 {
+		t.Fatalf("removed node remained in pool stats: %#v", stats)
+	}
+	if err := pool.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -320,8 +391,12 @@ func TestDefaultHealthChecker_RecoveryThreshold(t *testing.T) {
 		t.Error("Node should be unhealthy after 2 failures")
 	}
 
-	// Wait for the unhealthy event to be processed
-	time.Sleep(10 * time.Millisecond)
+	listenerContext, cancelListener := context.WithTimeout(context.Background(), time.Second)
+	if !listener.WaitForEvents(1, listenerContext) {
+		cancelListener()
+		t.Fatal("health listener did not receive the unhealthy event")
+	}
+	cancelListener()
 
 	// Clear events to focus on recovery
 	listener.Clear()
@@ -356,8 +431,11 @@ func TestDefaultHealthChecker_RecoveryThreshold(t *testing.T) {
 		t.Error("Node should be healthy after 3 successes (recovery threshold=3)")
 	}
 
-	// Give some time for async health listener to be called
-	time.Sleep(10 * time.Millisecond)
+	listenerContext, cancelListener = context.WithTimeout(context.Background(), time.Second)
+	defer cancelListener()
+	if !listener.WaitForEvents(1, listenerContext) {
+		t.Fatal("health listener did not receive the recovery event")
+	}
 
 	// Verify health listener was triggered for recovery
 	events := listener.GetEvents()
@@ -426,8 +504,11 @@ func TestDefaultHealthChecker_MultipleNodes(t *testing.T) {
 		t.Error("Node3 should still be healthy")
 	}
 
-	// Give some time for async health listener to be called
-	time.Sleep(10 * time.Millisecond)
+	listenerContext, cancelListener := context.WithTimeout(context.Background(), time.Second)
+	defer cancelListener()
+	if !listener.WaitForEvents(1, listenerContext) {
+		t.Fatal("health listener did not receive the node2 event")
+	}
 
 	// Verify only one health event for node2
 	events := listener.GetEvents()
@@ -567,8 +648,11 @@ func TestDefaultHealthChecker_HealthListener(t *testing.T) {
 	mockNode.SetHealthy(true)
 	checker.Check(ctx, mockNode) // Should trigger healthy event
 
-	// Give some time for async health listeners to be called
-	time.Sleep(10 * time.Millisecond)
+	listenerContext, cancelListener := context.WithTimeout(context.Background(), time.Second)
+	defer cancelListener()
+	if !listener1.WaitForEvents(2, listenerContext) || !listener2.WaitForEvents(2, listenerContext) {
+		t.Fatal("health listeners did not receive both events")
+	}
 
 	// Verify both listeners received both events
 	events1 := listener1.GetEvents()

@@ -264,11 +264,13 @@ func TestClientRejectsUnsupportedConnectionConfigReload(t *testing.T) {
 func waitForNodeChecks(t *testing.T, node *MockNode, minimum int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
 	for time.Now().Before(deadline) {
 		if node.GetCheckCallCount() >= minimum {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-ticker.C
 	}
 	t.Fatalf("node %s did not receive %d health checks", node.ID(), minimum)
 }

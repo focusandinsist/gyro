@@ -181,8 +181,10 @@ func TestHealthPoolTracksNodesAfterEnablingChecker(t *testing.T) {
 		t.Fatalf("enabling checker failed: %v", err)
 	}
 	deadline := time.Now().Add(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
 	for pool.IsNodeHealthy(node.ID()) && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+		<-ticker.C
 	}
 	if pool.IsNodeHealthy(node.ID()) {
 		t.Fatal("pool did not receive health events after enabling checker")

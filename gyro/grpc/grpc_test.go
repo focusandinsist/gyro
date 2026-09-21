@@ -78,8 +78,14 @@ func TestGRPCConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	if !ok {
 		t.Fatalf("convenience client locator is %T, want *gyro.HealthAwarePool", client.locator)
 	}
-
 	key := findGRPCKeyForNode(t, client.locator, "grpc-1")
+	replicas, err := client.GetClientsForReplicas(context.Background(), key, 2)
+	if err != nil || len(replicas) != 2 {
+		t.Fatalf("replica clients = %d, err = %v; want 2 clients", len(replicas), err)
+	}
+	if clients := client.GetAllClients(); len(clients) != 3 {
+		t.Fatalf("all clients = %d, want 3", len(clients))
+	}
 	connections["grpc-1.test"].healthy.Store(false)
 	waitForGRPCNodeHealth(t, pool, "grpc-1", false)
 
@@ -174,11 +180,13 @@ func findGRPCKeyForNode(t *testing.T, locator gyro.Locator, nodeID string) strin
 func waitForGRPCNodeHealth(t *testing.T, pool *gyro.HealthAwarePool, nodeID string, healthy bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
 	for time.Now().Before(deadline) {
 		if pool.IsNodeHealthy(nodeID) == healthy {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		<-ticker.C
 	}
 	t.Fatalf("node %s health did not become %v", nodeID, healthy)
 }

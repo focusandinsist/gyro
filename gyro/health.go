@@ -137,7 +137,6 @@ func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
 	}
 
 	stats.TotalChecks++
-	stats.LastCheckTime = time.Now()
 	hc.mu.Unlock()
 
 	checkCtx, cancel := context.WithTimeout(ctx, config.Timeout)
@@ -154,6 +153,7 @@ func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
 		hc.mu.Unlock()
 		return nil
 	}
+	stats.LastCheckTime = time.Now()
 	var listeners []HealthListener
 	var previousNotification <-chan struct{}
 	var notificationDone chan struct{}
@@ -653,7 +653,7 @@ func (hap *HealthAwarePool) RemoveNodeContext(ctx context.Context, nodeID string
 
 	hap.healthChecker.RemoveNode(nodeID)
 
-	hap.updateNodeHealth(nodeID, true)
+	hap.updateNodeHealth(nodeID, false)
 
 	return nil
 }
