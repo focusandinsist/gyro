@@ -259,28 +259,41 @@ type ClientHealth struct {
 	LastHealthCheck           time.Time `json:"last_health_check"`
 }
 
-// Client provides configuration and service discovery.
-type Client struct {
-	mu            sync.RWMutex
-	lifecycleMu   sync.Mutex
-	locator       Locator
-	healthChecker HealthChecker
+type clientDeps struct {
 	serviceName   string
 	discovery     ServiceDiscovery
 	configManager *ConfigManager
-	running       bool
-	runCancel     context.CancelFunc
-	configWatcher bool
+	nodeFactory   NodeFactory
+	healthChecker HealthChecker
+}
+
+type clientRun struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	pool   *HealthAwarePool
+}
+
+type clientState struct {
+	run           *clientRun
+	prepared      *HealthAwarePool
 	nodeFactory   NodeFactory
 	nodeInfos     map[string]NodeInfo
-	logger        atomic.Pointer[slog.Logger]
+	configWatcher bool
 
-	// Health tracking
-	healthMu                  sync.RWMutex
+	// Health tracking belongs to the client state snapshot, not to dependency wiring.
 	serviceDiscoveryHealthy   bool
 	lastServiceDiscoveryError string
 	serviceDiscoveryRetries   int
 	lastHealthCheck           time.Time
+}
+
+// Client provides configuration and service discovery.
+type Client struct {
+	stateMu     sync.RWMutex
+	lifecycleMu sync.Mutex
+	deps        clientDeps
+	state       clientState
+	logger      atomic.Pointer[slog.Logger]
 }
 
 // NodeFactory creates nodes from NodeInfo.
@@ -316,15 +329,19 @@ func NewClient(serviceName string, discovery ServiceDiscovery, configManager *Co
 	}
 
 	client := &Client{
-		serviceName:   serviceName,
-		discovery:     discovery,
-		configManager: configManager,
-		nodeFactory:   nodeFactory,
-		healthChecker: healthChecker,
-		nodeInfos:     make(map[string]NodeInfo),
-
-		// False until watchServiceNodes establishes its first watch.
-		serviceDiscoveryHealthy: false,
+		deps: clientDeps{
+			serviceName:   serviceName,
+			discovery:     discovery,
+			configManager: configManager,
+			nodeFactory:   nodeFactory,
+			healthChecker: healthChecker,
+		},
+		state: clientState{
+			nodeInfos:   make(map[string]NodeInfo),
+			nodeFactory: nodeFactory,
+			// False until watchServiceNodes establishes its first watch.
+			serviceDiscoveryHealthy: false,
+		},
 	}
 	client.logger.Store(discardLogger)
 
@@ -344,9 +361,14 @@ func (c *Client) SetLogger(logger *slog.Logger) {
 		logger = discardLogger
 	}
 	c.logger.Store(logger)
-	c.mu.RLock()
-	locator := c.locator
-	c.mu.RUnlock()
+	c.stateMu.RLock()
+	var locator Locator
+	if c.state.run != nil {
+		locator = c.state.run.pool
+	} else {
+		locator = c.state.prepared
+	}
+	c.stateMu.RUnlock()
 	if setter, ok := locator.(interface{ SetLogger(*slog.Logger) }); ok {
 		setter.SetLogger(logger)
 	}
@@ -361,7 +383,7 @@ func (c *Client) log() *slog.Logger {
 func (c *Client) buildLocatorUnsafe(config *ClientConfig, nodeFactory NodeFactory) (Locator, []NodeInfo, error) {
 	ctx := context.Background()
 
-	nodeInfos, err := c.discovery.Discover(ctx, c.serviceName)
+	nodeInfos, err := c.deps.discovery.Discover(ctx, c.deps.serviceName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to discover initial nodes: %w", err)
 	}
@@ -398,11 +420,11 @@ func (c *Client) buildLocatorUnsafe(config *ClientConfig, nodeFactory NodeFactor
 // initialize prepares a complete pool without holding the client state lock,
 // then publishes it with a short state transition.
 func (c *Client) initialize() error {
-	config := c.configManager.GetConfig()
-	c.mu.RLock()
-	nodeFactory := c.nodeFactory
-	healthChecker := c.healthChecker
-	c.mu.RUnlock()
+	config := c.deps.configManager.GetConfig()
+	c.stateMu.RLock()
+	nodeFactory := c.state.nodeFactory
+	healthChecker := c.deps.healthChecker
+	c.stateMu.RUnlock()
 	baseLocator, nodeInfos, err := c.buildLocatorUnsafe(config, nodeFactory)
 	if err != nil {
 		return err
@@ -411,25 +433,30 @@ func (c *Client) initialize() error {
 	healthAwarePool := NewHealthAwarePoolWithChecker(baseLocator, healthChecker)
 	healthAwarePool.SetLogger(c.log())
 
-	c.mu.Lock()
-	if c.locator != nil {
-		c.mu.Unlock()
+	c.stateMu.Lock()
+	if c.state.run != nil || c.state.prepared != nil {
+		c.stateMu.Unlock()
 		_ = healthAwarePool.Close()
 		return nil
 	}
-	c.locator = healthAwarePool
-	c.nodeInfos = make(map[string]NodeInfo, len(nodeInfos))
+	c.state.prepared = healthAwarePool
+	c.state.nodeInfos = make(map[string]NodeInfo, len(nodeInfos))
 	for _, nodeInfo := range nodeInfos {
-		c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
+		c.state.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
 	}
-	c.mu.Unlock()
+	c.stateMu.Unlock()
 
 	return nil
 }
 
 // getLocator returns the underlying locator
 func (c *Client) getLocator() Locator {
-	return c.locator
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	if c.state.run == nil {
+		return nil
+	}
+	return c.state.run.pool
 }
 
 // getPoolNodes returns all nodes from the locator
@@ -462,88 +489,62 @@ func (c *Client) Start(ctx context.Context) error {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 
-	c.mu.RLock()
-	running := c.running
-	locator := c.locator
-	c.mu.RUnlock()
-	if running {
+	c.stateMu.RLock()
+	run := c.state.run
+	c.stateMu.RUnlock()
+	if run != nil && run.ctx != nil {
 		return fmt.Errorf("client is already running")
 	}
 
 	// Stop releases the locator so a later Start can create a fresh run with
 	// new node connections and a new HealthAwarePool.
-	if locator == nil {
+	c.stateMu.RLock()
+	prepared := c.state.prepared
+	c.stateMu.RUnlock()
+	if prepared == nil {
 		if err := c.initialize(); err != nil {
 			return fmt.Errorf("failed to initialize client for start: %w", err)
 		}
 	}
 
 	runCtx, runCancel := context.WithCancel(ctx)
-	c.mu.Lock()
-	if c.running {
-		c.mu.Unlock()
-		runCancel()
-		return fmt.Errorf("client is already running")
-	}
-	c.runCancel = runCancel
-	c.running = true
-	registerConfigWatcher := !c.configWatcher
-	c.configWatcher = true
-	c.mu.Unlock()
+	c.stateMu.Lock()
+	run = &clientRun{ctx: runCtx, cancel: runCancel, pool: c.state.prepared}
+	c.state.prepared = nil
+	c.state.run = run
+	registerConfigWatcher := !c.state.configWatcher
+	c.state.configWatcher = true
+	c.stateMu.Unlock()
 
 	if registerConfigWatcher {
-		c.configManager.AddConfigWatcher(c.handleConfigChange)
+		c.deps.configManager.AddConfigWatcher(c.handleConfigChange)
 	}
 
-	go c.watchServiceNodes(runCtx)
-	go c.startHealthMonitoringWhenReady(runCtx)
+	go c.watchServiceNodes(run)
+	run.pool.StartHealthMonitoring(runCtx)
 
 	return nil
-}
-
-// startHealthMonitoringWhenReady waits for the locator to be initialized and then starts health monitoring
-func (c *Client) startHealthMonitoringWhenReady(ctx context.Context) {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			c.mu.RLock()
-			locator := c.locator
-			c.mu.RUnlock()
-
-			if locator != nil {
-				if healthAwarePool, ok := locator.(*HealthAwarePool); ok {
-					healthAwarePool.StartHealthMonitoring(ctx)
-				}
-				return
-			}
-		}
-	}
 }
 
 // Stop stops the client.
 func (c *Client) Stop() error {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
-
-	c.mu.Lock()
-	runCancel := c.runCancel
-	locator := c.locator
-	c.runCancel = nil
-	c.running = false
-	c.locator = nil
-	c.mu.Unlock()
-
-	if runCancel != nil {
-		runCancel()
+	c.stateMu.Lock()
+	run := c.state.run
+	prepared := c.state.prepared
+	c.state.run = nil
+	c.state.prepared = nil
+	c.state.nodeInfos = nil
+	c.stateMu.Unlock()
+	if run != nil {
+		if run.cancel != nil {
+			run.cancel()
+		}
+		return run.pool.Close()
 	}
-
-	if locator != nil {
-		return locator.Close()
+	if prepared != nil {
+		return prepared.Close()
 	}
 
 	return nil
@@ -551,9 +552,7 @@ func (c *Client) Stop() error {
 
 // GetLocator returns the underlying locator for direct access.
 func (c *Client) GetLocator() Locator {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.locator
+	return c.getLocator()
 }
 
 // Close closes the client.
@@ -564,21 +563,19 @@ func (c *Client) Close() error {
 // Health returns the current health status of the client
 func (c *Client) Health() *ClientHealth {
 	lastHealthCheck := c.lastHealthCheckTime()
-	c.healthMu.RLock()
-	defer c.healthMu.RUnlock()
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
 
 	return &ClientHealth{
-		ServiceDiscoveryHealthy:   c.serviceDiscoveryHealthy,
-		LastServiceDiscoveryError: c.lastServiceDiscoveryError,
-		ServiceDiscoveryRetries:   c.serviceDiscoveryRetries,
+		ServiceDiscoveryHealthy:   c.state.serviceDiscoveryHealthy,
+		LastServiceDiscoveryError: c.state.lastServiceDiscoveryError,
+		ServiceDiscoveryRetries:   c.state.serviceDiscoveryRetries,
 		LastHealthCheck:           lastHealthCheck,
 	}
 }
 
 func (c *Client) lastHealthCheckTime() time.Time {
-	c.mu.RLock()
-	checker := c.healthChecker
-	c.mu.RUnlock()
+	checker := c.deps.healthChecker
 	if provider, ok := checker.(interface{ LastCheckTime() time.Time }); ok {
 		return provider.LastCheckTime()
 	}
@@ -588,42 +585,49 @@ func (c *Client) lastHealthCheckTime() time.Time {
 // GetNodeForKey returns the routed node metadata without exposing a native
 // protocol client. It is useful for observability and routing assertions.
 func (c *Client) GetNodeForKey(ctx context.Context, key string) (Node, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.locator == nil {
+	locator := c.getLocator()
+	if locator == nil {
 		return nil, fmt.Errorf("client not started")
 	}
-	return c.locator.Get(ctx, key)
+	return locator.Get(ctx, key)
 }
 
 // IsHealthy returns true if the client is healthy
 func (c *Client) IsHealthy() bool {
-	c.healthMu.RLock()
-	defer c.healthMu.RUnlock()
-	return c.serviceDiscoveryHealthy
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.state.serviceDiscoveryHealthy
 }
 
 // updateServiceDiscoveryHealth updates the service discovery health status
-func (c *Client) updateServiceDiscoveryHealth(healthy bool, err error) {
-	c.healthMu.Lock()
-	defer c.healthMu.Unlock()
+func (c *Client) updateServiceDiscoveryHealth(run *clientRun, healthy bool, err error) {
+	// Serialize health publication with topology reconciliation so stateMu is
+	// never held while another lifecycle operation performs node I/O.
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.state.run != run {
+		return
+	}
 
-	c.serviceDiscoveryHealthy = healthy
+	c.state.serviceDiscoveryHealthy = healthy
 	if err != nil {
-		c.lastServiceDiscoveryError = err.Error()
+		c.state.lastServiceDiscoveryError = err.Error()
 		if !healthy {
-			c.serviceDiscoveryRetries++
+			c.state.serviceDiscoveryRetries++
 		}
 	} else {
-		c.lastServiceDiscoveryError = ""
+		c.state.lastServiceDiscoveryError = ""
 		if healthy {
-			c.serviceDiscoveryRetries = 0
+			c.state.serviceDiscoveryRetries = 0
 		}
 	}
 }
 
 // watchServiceNodes watches for service node changes with retry mechanism.
-func (c *Client) watchServiceNodes(ctx context.Context) {
+func (c *Client) watchServiceNodes(run *clientRun) {
+	ctx := run.ctx
 	const (
 		maxRetries = 10
 		baseDelay  = time.Second
@@ -639,9 +643,9 @@ func (c *Client) watchServiceNodes(ctx context.Context) {
 		default:
 		}
 
-		nodesCh, err := c.discovery.Watch(ctx, c.serviceName)
+		nodesCh, err := c.deps.discovery.Watch(ctx, c.deps.serviceName)
 		if err != nil {
-			c.updateServiceDiscoveryHealth(false, err)
+			c.updateServiceDiscoveryHealth(run, false, err)
 			c.log().Warn("service discovery watch failed", "attempt", retryCount+1, "max_retries", maxRetries, "error", err)
 
 			retryCount++
@@ -669,65 +673,65 @@ func (c *Client) watchServiceNodes(ctx context.Context) {
 		}
 
 		retryCount = 0
-		c.updateServiceDiscoveryHealth(true, nil)
+		c.updateServiceDiscoveryHealth(run, true, nil)
 		c.log().Info("service discovery watch established")
 
-		watchFailed := c.processServiceWatch(ctx, nodesCh)
+		watchFailed := c.processServiceWatch(run, nodesCh)
 		if !watchFailed {
 			return
 		}
 
-		c.updateServiceDiscoveryHealth(false, fmt.Errorf("service discovery watch channel closed unexpectedly"))
+		c.updateServiceDiscoveryHealth(run, false, fmt.Errorf("service discovery watch channel closed unexpectedly"))
 		c.log().Warn("service discovery watch failed, retrying")
 	}
 }
 
 // processServiceWatch processes events from the service discovery watch channel
 // Returns true if the watch failed and should be retried, false for normal shutdown
-func (c *Client) processServiceWatch(ctx context.Context, nodesCh <-chan []NodeInfo) bool {
+func (c *Client) processServiceWatch(run *clientRun, nodesCh <-chan []NodeInfo) bool {
 	for {
 		select {
-		case <-ctx.Done():
+		case <-run.ctx.Done():
 			return false // normal shutdown
 		case nodes, ok := <-nodesCh:
 			if !ok {
 				return true // channel closed, caller should retry
 			}
-			c.handleServiceNodesChange(ctx, nodes)
+			c.reconcileServiceNodes(run, nodes)
 		}
 	}
 }
 
 // handleServiceNodesChange handles changes in service nodes with incremental updates.
 func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []NodeInfo) {
+	c.stateMu.RLock()
+	run := c.state.run
+	c.stateMu.RUnlock()
+	if run != nil {
+		c.reconcileServiceNodes(run, newNodeInfos)
+	}
+}
+
+// reconcileServiceNodes serializes topology preparation with configuration
+// replacement and publishes only if this run still owns the client state.
+func (c *Client) reconcileServiceNodes(run *clientRun, newNodeInfos []NodeInfo) {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 
-	c.mu.Lock()
-	if c.nodeInfos == nil {
-		c.nodeInfos = make(map[string]NodeInfo)
-	}
-
-	if !c.running {
-		c.mu.Unlock()
+	c.stateMu.RLock()
+	if c.state.run != run || run.ctx == nil || run.ctx.Err() != nil {
+		c.stateMu.RUnlock()
 		return
 	}
-
-	if c.locator == nil {
-		c.mu.Unlock()
-		c.log().Error("locator is nil, cannot apply incremental update")
-		return
-	}
-
-	locator := c.locator
-	healthChecker := c.healthChecker
-	nodeFactory := c.nodeFactory
-	currentNodes := locator.GetAllNodes()
-	currentInfos := make(map[string]NodeInfo, len(c.nodeInfos))
-	for nodeID, nodeInfo := range c.nodeInfos {
+	locator := run.pool
+	healthChecker := c.deps.healthChecker
+	nodeFactory := c.state.nodeFactory
+	currentInfos := make(map[string]NodeInfo, len(c.state.nodeInfos))
+	for nodeID, nodeInfo := range c.state.nodeInfos {
 		currentInfos[nodeID] = cloneNodeInfo(nodeInfo)
 	}
-	c.mu.Unlock()
+	c.stateMu.RUnlock()
+	currentNodes := locator.GetAllNodes()
 
 	currentNodeMap := make(map[string]Node)
 	for _, node := range currentNodes {
@@ -767,7 +771,7 @@ func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []No
 	sortNodeInfosByID(nodesToUpdate)
 
 	for _, nodeID := range nodesToRemove {
-		if err := locator.RemoveNodeContext(ctx, nodeID); err != nil {
+		if err := locator.RemoveNodeContext(run.ctx, nodeID); err != nil {
 			c.log().Error("failed to remove node", "node_id", nodeID, "error", err)
 		} else {
 			delete(currentInfos, nodeID)
@@ -785,7 +789,7 @@ func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []No
 			continue
 		}
 
-		if err := locator.AddNodeContext(ctx, node); err != nil {
+		if err := locator.AddNodeContext(run.ctx, node); err != nil {
 			_ = node.Close()
 			c.log().Error("failed to add node", "node_id", nodeInfo.ID, "error", err)
 		} else {
@@ -798,7 +802,7 @@ func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []No
 	}
 
 	for _, nodeInfo := range nodesToUpdate {
-		if err := locator.RemoveNodeContext(ctx, nodeInfo.ID); err != nil {
+		if err := locator.RemoveNodeContext(run.ctx, nodeInfo.ID); err != nil {
 			c.log().Error("failed to remove node for update", "node_id", nodeInfo.ID, "error", err)
 			continue
 		}
@@ -812,7 +816,7 @@ func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []No
 			continue
 		}
 
-		if err := locator.AddNodeContext(ctx, node); err != nil {
+		if err := locator.AddNodeContext(run.ctx, node); err != nil {
 			_ = node.Close()
 			c.log().Error("failed to add updated node", "node_id", nodeInfo.ID, "error", err)
 		} else {
@@ -827,11 +831,11 @@ func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []No
 	c.log().Info("incremental update completed",
 		"added", len(nodesToAdd), "removed", len(nodesToRemove), "updated", len(nodesToUpdate))
 
-	c.mu.Lock()
-	if c.running && c.locator == locator {
-		c.nodeInfos = currentInfos
+	c.stateMu.Lock()
+	if c.state.run == run && run.ctx.Err() == nil {
+		c.state.nodeInfos = currentInfos
 	}
-	c.mu.Unlock()
+	c.stateMu.Unlock()
 }
 
 // handleConfigChange handles configuration changes with incremental updates.
@@ -839,14 +843,14 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 
-	c.mu.RLock()
-	running := c.running
-	activeLocator := c.locator
-	currentFactory := c.nodeFactory
-	c.mu.RUnlock()
-	if !running || activeLocator == nil {
+	c.stateMu.RLock()
+	run := c.state.run
+	currentFactory := c.state.nodeFactory
+	c.stateMu.RUnlock()
+	if run == nil || run.ctx == nil || run.ctx.Err() != nil {
 		return nil
 	}
+	activeLocator := run.pool
 
 	locatorChanged := !c.locatorConfigEqual(oldConfig.Locator, newConfig.Locator)
 	connectionChanged := !c.connectionConfigEqual(oldConfig.Connection, newConfig.Connection)
@@ -891,13 +895,7 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 	}
 
 	if replacementLocator != nil {
-		healthAwarePool, ok := activeLocator.(*HealthAwarePool)
-		if !ok {
-			_ = replacementLocator.Close()
-			return fmt.Errorf("active locator does not support atomic replacement")
-		}
-
-		if err := healthAwarePool.ReplaceLocator(replacementLocator); err != nil {
+		if err := activeLocator.ReplaceLocator(replacementLocator); err != nil {
 			_ = replacementLocator.Close()
 			if healthCheckerChanged {
 				if rollbackErr := c.updateHealthCheckerConfig(oldConfig.HealthChecker); rollbackErr != nil {
@@ -907,15 +905,15 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 			return fmt.Errorf("failed to replace active locator: %w", err)
 		}
 
-		c.mu.Lock()
-		if c.running && c.locator == activeLocator {
-			c.nodeFactory = replacementFactory
-			c.nodeInfos = make(map[string]NodeInfo, len(replacementNodeInfos))
+		c.stateMu.Lock()
+		if c.state.run == run && run.ctx.Err() == nil {
+			c.state.nodeFactory = replacementFactory
+			c.state.nodeInfos = make(map[string]NodeInfo, len(replacementNodeInfos))
 			for _, nodeInfo := range replacementNodeInfos {
-				c.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
+				c.state.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
 			}
 		}
-		c.mu.Unlock()
+		c.stateMu.Unlock()
 		c.log().Info("client locator replaced after configuration change",
 			"locator_changed", locatorChanged, "connection_changed", connectionChanged)
 	}
@@ -926,18 +924,16 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
 
 // GetStats returns client statistics.
 func (c *Client) GetStats() HealthAwarePoolStats {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if c.locator == nil {
+	locator := c.getLocator()
+	if locator == nil {
 		return HealthAwarePoolStats{}
 	}
 
-	allNodes := c.locator.GetAllNodes()
+	allNodes := locator.GetAllNodes()
 	totalNodes := len(allNodes)
 	healthyCount := 0
 	for _, node := range allNodes {
-		if c.healthChecker.IsNodeHealthy(node.ID()) {
+		if c.deps.healthChecker.IsNodeHealthy(node.ID()) {
 			healthyCount++
 		}
 	}
@@ -960,14 +956,12 @@ type nativeClientProvider interface {
 // NodeFactory produces nodes that don't implement nativeClientProvider, the
 // Node itself is returned instead.
 func (c *Client) GetClientForKey(ctx context.Context, key string) (any, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if c.locator == nil {
+	locator := c.getLocator()
+	if locator == nil {
 		return nil, fmt.Errorf("client not started")
 	}
 
-	node, err := c.locator.Get(ctx, key)
+	node, err := locator.Get(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node for key %s: %w", key, err)
 	}
@@ -1018,7 +1012,7 @@ func (c *Client) updateHealthCheckerConfig(newConfig HealthCheckerConfig) error 
 		return fmt.Errorf("invalid health checker config: %w", err)
 	}
 
-	checker, ok := c.healthChecker.(ConfigurableHealthChecker)
+	checker, ok := c.deps.healthChecker.(ConfigurableHealthChecker)
 	if !ok {
 		return fmt.Errorf("health checker does not support runtime configuration")
 	}

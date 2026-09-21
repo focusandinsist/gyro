@@ -280,10 +280,10 @@ type clientLockCheckingFactory struct {
 
 func (f *clientLockCheckingFactory) CreateNode(info NodeInfo) (Node, error) {
 	if f.client != nil {
-		if !f.client.mu.TryLock() {
+		if !f.client.stateMu.TryLock() {
 			f.lockHeld.Store(true)
 		} else {
-			f.client.mu.Unlock()
+			f.client.stateMu.Unlock()
 		}
 	}
 	return &clientLockCheckingNode{Node: NewMockNode(info.ID, info.Address), factory: f}, nil
@@ -296,10 +296,10 @@ type clientLockCheckingNode struct {
 
 func (n *clientLockCheckingNode) Close() error {
 	if n.factory.client != nil {
-		if !n.factory.client.mu.TryLock() {
+		if !n.factory.client.stateMu.TryLock() {
 			n.factory.lockHeld.Store(true)
 		} else {
-			n.factory.client.mu.Unlock()
+			n.factory.client.stateMu.Unlock()
 		}
 	}
 	return n.Node.Close()
