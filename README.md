@@ -11,6 +11,10 @@ Gyro 是一个基于一致性哈希的 Go 客户端侧分片中间件（client-s
 
 ## 快速开始
 
+```bash
+go get github.com/focusandinsist/gyro/gyro@latest
+```
+
 ```go
 package main
 
@@ -20,7 +24,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	redisadapter "gyro/gyro/redis"
+	redisadapter "github.com/focusandinsist/gyro/gyro/redis"
 )
 
 func main() {
@@ -79,11 +83,10 @@ if err := client.Start(ctx); err != nil {
 native, err := client.GetClientForKey(ctx, "user:123")
 ```
 
-gRPC 用法结构上完全对称,把 `redisadapter` 换成 `gyro/gyro/grpc`,拿到的原生客户端是 `*grpc.ClientConn`,自己用生成的 stub(如 `pb.NewUserServiceClient(conn)`)调用即可。gRPC 健康检查走的是标准 `grpc.health.v1.Health` 协议;如果后端服务没有注册这个健康检查服务,Gyro 会回退到用连接的连通性状态判断,不会因此把所有节点都判为不健康。
+gRPC 用法结构上完全对称,把 `redisadapter` 换成 `github.com/focusandinsist/gyro/gyro/grpc`,拿到的原生客户端是 `*grpc.ClientConn`,自己用生成的 stub(如 `pb.NewUserServiceClient(conn)`)调用即可。gRPC 健康检查走的是标准 `grpc.health.v1.Health` 协议;如果后端服务没有注册这个健康检查服务,Gyro 会回退到用连接的连通性状态判断,不会因此把所有节点都判为不健康。
 
 ## 已知限制
 
-- go.mod 的 module path 是 `gyro`,与实际仓库地址 `github.com/focusandinsist/gyro` 不一致,目前还不能通过 `go get github.com/focusandinsist/gyro` 直接拉取,只能本地 clone 后作为同名 module 使用。
 - gRPC 适配器目前只支持不加密的传输(`insecure.NewCredentials()`),没有暴露 TLS 配置。
 
 ## 项目结构

@@ -11,9 +11,10 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
-	"gyro/gyro"
+	"github.com/focusandinsist/gyro/gyro"
 )
 
 type GRPCConnection interface {
@@ -28,15 +29,28 @@ type GRPCConnection interface {
 type DefaultGRPCConnection struct {
 	address   string
 	conn      *grpc.ClientConn
+	config    gyro.ConnectionConfig
 	connected atomic.Bool
 }
 
-// NewGRPCConnection creates a new gRPC connection. grpc.NewClient does not
-// dial eagerly, so the connection is established lazily on first RPC / health
-// check. TLS is not configured here (insecure transport); if the backend
-// requires TLS, extend gyro.ConnectionConfig with credential options.
+// NewGRPCConnection creates a gRPC connection and applies the connection
+// timeouts to health-check dialing and RPC contexts. gRPC multiplexes streams over one
+// transport, so MaxActiveConns and MaxIdleConns do not map to a connection
+// pool and are intentionally not used.
 func NewGRPCConnection(address string, config gyro.ConnectionConfig) (GRPCConnection, error) {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if config.ConnectTimeout < 0 || config.ReadTimeout < 0 || config.WriteTimeout < 0 || config.IdleTimeout < 0 {
+		return nil, fmt.Errorf("gRPC connection timeouts cannot be negative")
+	}
+	options := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:    config.IdleTimeout,
+			Timeout: config.WriteTimeout,
+		}),
+		grpc.WithUnaryInterceptor(timeoutUnaryInterceptor(config)),
+		grpc.WithStreamInterceptor(timeoutStreamInterceptor(config)),
+	}
+	conn, err := grpc.NewClient(address, options...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create grpc client for %s: %w", address, err)
 	}
@@ -44,10 +58,56 @@ func NewGRPCConnection(address string, config gyro.ConnectionConfig) (GRPCConnec
 	c := &DefaultGRPCConnection{
 		address: address,
 		conn:    conn,
+		config:  config,
 	}
 	c.connected.Store(true) // optimistic; Ping() will correct this
 
 	return c, nil
+}
+
+func timeoutUnaryInterceptor(config gyro.ConnectionConfig) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, request, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, options ...grpc.CallOption) error {
+		timeout := config.ReadTimeout
+		if timeout <= 0 || (config.ConnectTimeout > 0 && config.ConnectTimeout < timeout) {
+			timeout = config.ConnectTimeout
+		}
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		return invoker(ctx, method, request, reply, cc, options...)
+	}
+}
+
+func timeoutStreamInterceptor(config gyro.ConnectionConfig) grpc.StreamClientInterceptor {
+	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, options ...grpc.CallOption) (grpc.ClientStream, error) {
+		timeout := config.ReadTimeout
+		if timeout <= 0 || (config.WriteTimeout > 0 && config.WriteTimeout < timeout) {
+			timeout = config.WriteTimeout
+		}
+		if timeout <= 0 {
+			return streamer(ctx, desc, cc, method, options...)
+		}
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		stream, err := streamer(ctx, desc, cc, method, options...)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		return &cancelingClientStream{ClientStream: stream, cancel: cancel}, nil
+	}
+}
+
+type cancelingClientStream struct {
+	grpc.ClientStream
+	cancel context.CancelFunc
+}
+
+func (s *cancelingClientStream) CloseSend() error {
+	err := s.ClientStream.CloseSend()
+	s.cancel()
+	return err
 }
 
 // Close closes the gRPC connection.
@@ -73,6 +133,11 @@ func (c *DefaultGRPCConnection) GetState() string {
 // falls back to the raw connectivity state so services that haven't wired up
 // health checking aren't unnecessarily marked unhealthy.
 func (c *DefaultGRPCConnection) Ping(ctx context.Context) error {
+	if c.config.ConnectTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.config.ConnectTimeout)
+		defer cancel()
+	}
 	client := healthpb.NewHealthClient(c.conn)
 	resp, err := client.Check(ctx, &healthpb.HealthCheckRequest{})
 	if err == nil {
@@ -109,7 +174,7 @@ type GRPCNode struct {
 	address string
 	conn    GRPCConnection
 	mu      sync.RWMutex
-	healthy bool
+	closed  bool
 }
 
 func NewGRPCNode(id, address string, conn GRPCConnection) *GRPCNode {
@@ -117,7 +182,6 @@ func NewGRPCNode(id, address string, conn GRPCConnection) *GRPCNode {
 		id:      id,
 		address: address,
 		conn:    conn,
-		healthy: true,
 	}
 }
 
@@ -130,24 +194,24 @@ func (gn *GRPCNode) Address() string {
 }
 
 func (gn *GRPCNode) IsHealthy(ctx context.Context) bool {
-	if err := gn.conn.Ping(ctx); err != nil {
-		gn.mu.Lock()
-		gn.healthy = false
-		gn.mu.Unlock()
+	gn.mu.RLock()
+	closed := gn.closed
+	gn.mu.RUnlock()
+	if closed {
 		return false
 	}
 
-	gn.mu.Lock()
-	gn.healthy = true
-	gn.mu.Unlock()
-	return true
+	return gn.conn.Ping(ctx) == nil
 }
 
 func (gn *GRPCNode) Close() error {
 	gn.mu.Lock()
 	defer gn.mu.Unlock()
 
-	gn.healthy = false
+	if gn.closed {
+		return nil
+	}
+	gn.closed = true
 	return gn.conn.Close()
 }
 
@@ -155,7 +219,7 @@ func (gn *GRPCNode) GetNativeClient() any {
 	gn.mu.RLock()
 	defer gn.mu.RUnlock()
 
-	if !gn.healthy {
+	if gn.closed {
 		return nil
 	}
 
@@ -163,31 +227,43 @@ func (gn *GRPCNode) GetNativeClient() any {
 }
 
 type GRPCClientConfig struct {
-	Locator    gyro.LocatorConfig    `json:"locator"`
-	Connection gyro.ConnectionConfig `json:"connection"`
+	Locator       gyro.LocatorConfig       `json:"locator"`
+	HealthChecker gyro.HealthCheckerConfig `json:"health_checker"`
+	Connection    gyro.ConnectionConfig    `json:"connection"`
 }
 
 func DefaultGRPCClientConfig() *GRPCClientConfig {
 	return &GRPCClientConfig{
-		Locator:    gyro.DefaultLocatorConfig(),
-		Connection: gyro.DefaultConnectionConfig(),
+		Locator:       gyro.DefaultLocatorConfig(),
+		HealthChecker: gyro.DefaultHealthCheckerConfig(),
+		Connection:    gyro.DefaultConnectionConfig(),
 	}
 }
 
 type GRPCClient struct {
 	locator gyro.Locator
 	config  *GRPCClientConfig
+	cancel  context.CancelFunc
 }
 
 // NewGRPCClient creates a client-side sharded gRPC cluster client. Each
 // address gets its own *grpc.ClientConn; routing between them is done via
 // consistent hashing.
 func NewGRPCClient(addresses []string, config *GRPCClientConfig) (*GRPCClient, error) {
+	return newGRPCClient(addresses, config, nil, nil)
+}
+
+func newGRPCClient(addresses []string, config *GRPCClientConfig, factory *GRPCNodeFactory, healthChecker gyro.HealthChecker) (*GRPCClient, error) {
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("at least one gRPC address is required")
 	}
 	if config == nil {
 		config = DefaultGRPCClientConfig()
+	}
+	configSnapshot := *config
+	config = &configSnapshot
+	if err := gyro.ValidateHealthCheckerConfig(config.HealthChecker); err != nil {
+		return nil, fmt.Errorf("invalid health checker config: %w", err)
 	}
 
 	locator, err := gyro.NewConsistentLocator(config.Locator)
@@ -195,30 +271,42 @@ func NewGRPCClient(addresses []string, config *GRPCClientConfig) (*GRPCClient, e
 		return nil, fmt.Errorf("failed to create connection locator: %w", err)
 	}
 
-	factory := &GRPCNodeFactory{config: config}
+	if factory == nil {
+		factory = &GRPCNodeFactory{config: config, newConnection: NewGRPCConnection}
+	}
 	for i, addr := range addresses {
 		node, err := factory.CreateNode(gyro.NodeInfo{
 			ID:      fmt.Sprintf("grpc-%d", i+1),
 			Address: addr,
 		})
 		if err != nil {
+			_ = locator.Close()
 			return nil, fmt.Errorf("failed to create node for %s: %w", addr, err)
 		}
 		if err := locator.AddNode(node); err != nil {
+			_ = node.Close()
+			_ = locator.Close()
 			return nil, fmt.Errorf("failed to add node for %s: %w", addr, err)
 		}
 	}
+	if healthChecker == nil {
+		healthChecker = gyro.NewDefaultHealthChecker(config.HealthChecker)
+	}
+	healthAwarePool := gyro.NewHealthAwarePoolWithChecker(locator, healthChecker)
+	healthCtx, cancel := context.WithCancel(context.Background())
+	healthAwarePool.StartHealthMonitoring(healthCtx)
 
 	return &GRPCClient{
-		locator: locator,
+		locator: healthAwarePool,
 		config:  config,
+		cancel:  cancel,
 	}, nil
 }
 
 // GetClientForKey returns the native gRPC client for the given key.
 // Routes the key to the correct gRPC node and returns the native client for direct use.
 func (gc *GRPCClient) GetClientForKey(ctx context.Context, key string) (any, error) {
-	node, err := gc.locator.Get(ctx, key)
+	node, err := gc.GetNodeForKey(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("gyro: failed to get node for key '%s': %w", key, err)
 	}
@@ -234,6 +322,15 @@ func (gc *GRPCClient) GetClientForKey(ctx context.Context, key string) (any, err
 	}
 
 	return nativeClient, nil
+}
+
+// GetNodeForKey returns the routed node metadata for observability and tests.
+func (gc *GRPCClient) GetNodeForKey(ctx context.Context, key string) (gyro.Node, error) {
+	node, err := gc.locator.Get(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("gyro: failed to get node for key '%s': %w", key, err)
+	}
+	return node, nil
 }
 
 // GetClientsForReplicas returns native gRPC clients for replica nodes.
@@ -281,6 +378,9 @@ func (gc *GRPCClient) GetAllClients() map[string]any {
 
 // Close closes all connections and releases resources.
 func (gc *GRPCClient) Close() error {
+	if gc.cancel != nil {
+		gc.cancel()
+	}
 	return gc.locator.Close()
 }
 
@@ -290,19 +390,38 @@ func NewGRPCCluster(addresses []string) (*GRPCClient, error) {
 
 // GRPCNodeFactory creates gRPC nodes.
 type GRPCNodeFactory struct {
-	config *GRPCClientConfig
+	config        *GRPCClientConfig
+	newConnection func(address string, config gyro.ConnectionConfig) (GRPCConnection, error)
 }
 
 // NewGRPCNodeFactory creates a new gRPC node factory.
 func NewGRPCNodeFactory() *GRPCNodeFactory {
 	return &GRPCNodeFactory{
-		config: DefaultGRPCClientConfig(),
+		config:        DefaultGRPCClientConfig(),
+		newConnection: NewGRPCConnection,
 	}
+}
+
+// WithConnectionConfig returns an independent factory for a new connection
+// configuration. The current factory remains unchanged until a Client has
+// successfully built and published the replacement locator.
+func (f *GRPCNodeFactory) WithConnectionConfig(connectionConfig gyro.ConnectionConfig) (gyro.NodeFactory, error) {
+	if f == nil || f.config == nil {
+		return nil, fmt.Errorf("gRPC node factory is not initialized")
+	}
+
+	configCopy := *f.config
+	configCopy.Connection = connectionConfig
+	return &GRPCNodeFactory{config: &configCopy, newConnection: f.newConnection}, nil
 }
 
 // CreateNode creates a new gRPC node from NodeInfo.
 func (f *GRPCNodeFactory) CreateNode(info gyro.NodeInfo) (gyro.Node, error) {
-	conn, err := NewGRPCConnection(info.Address, f.config.Connection)
+	newConnection := f.newConnection
+	if newConnection == nil {
+		newConnection = NewGRPCConnection
+	}
+	conn, err := newConnection(info.Address, f.config.Connection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC connection to %s: %w", info.Address, err)
 	}

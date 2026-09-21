@@ -2,6 +2,7 @@ package gyro
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -21,7 +22,9 @@ type Locator interface {
 	Get(ctx context.Context, key string) (Node, error)
 	GetReplicas(ctx context.Context, key string, count int) ([]Node, error)
 	AddNode(node Node) error
+	AddNodeContext(ctx context.Context, node Node) error
 	RemoveNode(nodeID string) error
+	RemoveNodeContext(ctx context.Context, nodeID string) error
 	GetAllNodes() []Node
 	Close() error
 }
@@ -31,6 +34,13 @@ type LocatorConfig struct {
 	ReplicationFactor int     `json:"replication_factor"`
 	Load              float64 `json:"load"`
 	HashFunction      string  `json:"hash_function"`
+}
+
+type hashRing interface {
+	LocateKey(ctx context.Context, key []byte) (string, error)
+	LocateReplicas(ctx context.Context, key []byte, count int) ([]string, error)
+	Add(ctx context.Context, member string) error
+	Remove(ctx context.Context, member string) error
 }
 
 func DefaultLocatorConfig() LocatorConfig {
@@ -45,12 +55,28 @@ func DefaultLocatorConfig() LocatorConfig {
 type ConsistentLocator struct {
 	mu     sync.RWMutex
 	nodes  map[string]Node
-	ring   *consistent.Consistent
+	ring   hashRing
 	config LocatorConfig
 	logger atomic.Pointer[slog.Logger]
 }
 
 func NewConsistentLocator(config LocatorConfig) (*ConsistentLocator, error) {
+	ring, err := newHashRing(config)
+	if err != nil {
+		return nil, err
+	}
+
+	cl := &ConsistentLocator{
+		nodes:  make(map[string]Node),
+		ring:   ring,
+		config: config,
+	}
+	cl.logger.Store(discardLogger)
+
+	return cl, nil
+}
+
+func newHashRing(config LocatorConfig) (hashRing, error) {
 	var hasher consistent.Hasher
 	switch config.HashFunction {
 	case "", "xxhash":
@@ -73,14 +99,7 @@ func NewConsistentLocator(config LocatorConfig) (*ConsistentLocator, error) {
 		return nil, fmt.Errorf("failed to create consistent hash ring: %w", err)
 	}
 
-	cl := &ConsistentLocator{
-		nodes:  make(map[string]Node),
-		ring:   ring,
-		config: config,
-	}
-	cl.logger.Store(discardLogger)
-
-	return cl, nil
+	return ring, nil
 }
 
 // SetLogger overrides the logger used for internal diagnostics. Passing nil
@@ -153,6 +172,15 @@ func (cl *ConsistentLocator) GetReplicas(ctx context.Context, key string, count 
 
 // AddNode adds a new node to the locator.
 func (cl *ConsistentLocator) AddNode(node Node) error {
+	return cl.AddNodeContext(context.Background(), node)
+}
+
+// AddNodeContext adds a node while honoring the caller's cancellation and
+// deadline during ring rebalancing.
+func (cl *ConsistentLocator) AddNodeContext(ctx context.Context, node Node) error {
+	if ctx == nil {
+		return fmt.Errorf("context cannot be nil")
+	}
 	if node == nil {
 		return fmt.Errorf("node cannot be nil")
 	}
@@ -169,7 +197,7 @@ func (cl *ConsistentLocator) AddNode(node Node) error {
 		return fmt.Errorf("node %s already exists in locator", nodeID)
 	}
 
-	if err := cl.ring.Add(context.Background(), nodeID); err != nil {
+	if err := cl.ring.Add(ctx, nodeID); err != nil {
 		return fmt.Errorf("failed to add node %s to consistent hash ring: %w", nodeID, err)
 	}
 
@@ -180,31 +208,31 @@ func (cl *ConsistentLocator) AddNode(node Node) error {
 
 // RemoveNode removes a node from the locator.
 func (cl *ConsistentLocator) RemoveNode(nodeID string) error {
+	return cl.RemoveNodeContext(context.Background(), nodeID)
+}
+
+// RemoveNodeContext removes a node while honoring the caller's cancellation
+// and deadline during ring rebalancing.
+func (cl *ConsistentLocator) RemoveNodeContext(ctx context.Context, nodeID string) error {
+	if ctx == nil {
+		return fmt.Errorf("context cannot be nil")
+	}
 	if nodeID == "" {
 		return fmt.Errorf("node ID cannot be empty")
 	}
 
-	var nodeToClose Node
-	func() {
-		cl.mu.Lock()
-		defer cl.mu.Unlock()
-
-		node, exists := cl.nodes[nodeID]
-		if !exists {
-			return
-		}
-
-		if err := cl.ring.Remove(context.Background(), nodeID); err != nil {
-			cl.log().Warn("failed to remove node from consistent hash ring", "node_id", nodeID, "error", err)
-		}
-
-		delete(cl.nodes, nodeID)
-		nodeToClose = node
-	}()
-
-	if nodeToClose == nil {
+	cl.mu.Lock()
+	nodeToClose, exists := cl.nodes[nodeID]
+	if !exists {
+		cl.mu.Unlock()
 		return fmt.Errorf("node %s not found in locator", nodeID)
 	}
+	if err := cl.ring.Remove(ctx, nodeID); err != nil {
+		cl.mu.Unlock()
+		return fmt.Errorf("failed to remove node %s from consistent hash ring: %w", nodeID, err)
+	}
+	delete(cl.nodes, nodeID)
+	cl.mu.Unlock()
 
 	// Close outside the lock so a slow Close() doesn't block other locator operations.
 	if err := nodeToClose.Close(); err != nil {
@@ -230,18 +258,24 @@ func (cl *ConsistentLocator) GetAllNodes() []Node {
 // Close closes all connections and releases resources.
 func (cl *ConsistentLocator) Close() error {
 	cl.mu.Lock()
-	defer cl.mu.Unlock()
+	nodes := cl.nodes
+	cl.nodes = make(map[string]Node)
+	newRing, err := newHashRing(cl.config)
+	if err != nil {
+		cl.mu.Unlock()
+		return fmt.Errorf("failed to reset closed locator ring: %w", err)
+	}
+	cl.ring = newRing
+	cl.mu.Unlock()
 
-	var lastErr error
-	for nodeID, node := range cl.nodes {
+	var closeErr error
+	for nodeID, node := range nodes {
 		if err := node.Close(); err != nil {
-			lastErr = fmt.Errorf("failed to close node %s: %w", nodeID, err)
+			closeErr = errors.Join(closeErr, fmt.Errorf("failed to close node %s: %w", nodeID, err))
 		}
 	}
 
-	cl.nodes = make(map[string]Node)
-
-	return lastErr
+	return closeErr
 }
 
 // GetStats returns statistics about the locator.

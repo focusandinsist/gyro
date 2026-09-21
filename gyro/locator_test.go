@@ -2,8 +2,32 @@ package gyro
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
+	"time"
 )
+
+type removeFailingRing struct {
+	hashRing
+	err error
+}
+
+type contextAwareRing struct {
+	hashRing
+}
+
+func (r *contextAwareRing) Add(ctx context.Context, _ string) error {
+	return ctx.Err()
+}
+
+func (r *contextAwareRing) Remove(ctx context.Context, _ string) error {
+	return ctx.Err()
+}
+
+func (r *removeFailingRing) Remove(context.Context, string) error {
+	return r.err
+}
 
 func TestConsistentLocator_AddNode(t *testing.T) {
 	config := DefaultLocatorConfig()
@@ -277,5 +301,119 @@ func TestConsistentLocator_DuplicateNode(t *testing.T) {
 	allNodes := locator.GetAllNodes()
 	if len(allNodes) != 1 {
 		t.Errorf("Expected 1 node after duplicate add attempt, got %d", len(allNodes))
+	}
+}
+
+func TestConsistentLocator_RemoveFailureKeepsNodeAndConnection(t *testing.T) {
+	locator, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatalf("NewConsistentLocator failed: %v", err)
+	}
+	node1 := NewMockNode("node1", "127.0.0.1:6379")
+	node2 := NewMockNode("node2", "127.0.0.1:6380")
+	if err := locator.AddNode(node1); err != nil {
+		t.Fatalf("AddNode(node1) failed: %v", err)
+	}
+	if err := locator.AddNode(node2); err != nil {
+		t.Fatalf("AddNode(node2) failed: %v", err)
+	}
+	removeErr := errors.New("ring removal failed")
+	locator.ring = &removeFailingRing{hashRing: locator.ring, err: removeErr}
+
+	if err := locator.RemoveNode(node1.ID()); !errors.Is(err, removeErr) {
+		t.Fatalf("RemoveNode error = %v, want %v", err, removeErr)
+	}
+	if got := len(locator.GetAllNodes()); got != 2 {
+		t.Fatalf("failed ring removal changed node map size to %d, want 2", got)
+	}
+	if !node1.IsHealthy(context.Background()) {
+		t.Fatal("failed ring removal closed the node connection")
+	}
+	for i := 0; i < 100; i++ {
+		node, err := locator.Get(context.Background(), fmt.Sprintf("key-%d", i))
+		if err != nil {
+			t.Fatalf("Get after failed removal returned split ring/map state: %v", err)
+		}
+		if node.ID() != node1.ID() && node.ID() != node2.ID() {
+			t.Fatalf("Get returned unknown node %q", node.ID())
+		}
+	}
+}
+
+func TestConsistentLocator_NodeChangesPropagateContextCancellation(t *testing.T) {
+	locator, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseRing := locator.ring
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	locator.ring = &contextAwareRing{hashRing: baseRing}
+	if err := locator.AddNodeContext(canceledCtx, NewMockNode("new", "new")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AddNodeContext error = %v, want context.Canceled", err)
+	}
+
+	node := NewMockNode("existing", "existing")
+	locator.ring = baseRing
+	if err := locator.AddNode(node); err != nil {
+		t.Fatal(err)
+	}
+	locator.ring = &contextAwareRing{hashRing: baseRing}
+	if err := locator.RemoveNodeContext(canceledCtx, node.ID()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RemoveNodeContext error = %v, want context.Canceled", err)
+	}
+	if got := len(locator.GetAllNodes()); got != 1 {
+		t.Fatalf("canceled removal changed node count to %d", got)
+	}
+}
+
+type blockingCloseNode struct {
+	id      string
+	started chan struct{}
+	release chan struct{}
+}
+
+func (n *blockingCloseNode) ID() string                     { return n.id }
+func (n *blockingCloseNode) Address() string                { return n.id }
+func (n *blockingCloseNode) IsHealthy(context.Context) bool { return true }
+func (n *blockingCloseNode) Close() error {
+	select {
+	case <-n.started:
+	default:
+		close(n.started)
+	}
+	<-n.release
+	return nil
+}
+
+func TestConsistentLocator_CloseDoesNotHoldLockDuringNodeClose(t *testing.T) {
+	locator, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := &blockingCloseNode{id: "node", started: make(chan struct{}), release: make(chan struct{})}
+	if err := locator.AddNode(node); err != nil {
+		t.Fatal(err)
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- locator.Close() }()
+	select {
+	case <-node.started:
+	case <-time.After(time.Second):
+		t.Fatal("node close did not start")
+	}
+	operationDone := make(chan error, 1)
+	go func() { operationDone <- locator.AddNode(NewMockNode("new", "new")) }()
+	select {
+	case err := <-operationDone:
+		if err != nil {
+			t.Fatalf("AddNode while Close was closing detached node failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("locator lock was held while node Close blocked")
+	}
+	close(node.release)
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close failed: %v", err)
 	}
 }

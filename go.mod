@@ -1,4 +1,4 @@
-module gyro
+module github.com/focusandinsist/gyro
 
 go 1.23.0
 
