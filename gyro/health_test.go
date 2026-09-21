@@ -111,9 +111,7 @@ func TestHealthAwarePoolReplaceLocatorSerializesWithClose(t *testing.T) {
 		started: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	pool.locatorMu.Lock()
-	pool.Locator = blocking
-	pool.locatorMu.Unlock()
+	pool.snapshot.Store(&poolSnapshot{locator: blocking, healthyNodes: pool.GetHealthStatus()})
 
 	replacement, err := NewConsistentLocator(DefaultLocatorConfig())
 	if err != nil {

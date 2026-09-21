@@ -70,17 +70,29 @@ func DefaultHealthCheckerConfig() HealthCheckerConfig {
 }
 
 type DefaultHealthChecker struct {
-	lifecycleMu      sync.Mutex
-	mu               sync.RWMutex
-	config           HealthCheckerConfig
-	nodes            map[string]Node
-	nodeGenerations  map[string]uint64
-	nodeStats        map[string]*NodeHealthStats
+	checkerState
+	checkerLifecycle
+	checkerBroadcaster
+	maxWorkers int
+}
+
+type checkerState struct {
+	mu              sync.RWMutex
+	config          HealthCheckerConfig
+	nodes           map[string]Node
+	nodeGenerations map[string]uint64
+	nodeStats       map[string]*NodeHealthStats
+}
+
+type checkerBroadcaster struct {
 	healthListeners  []HealthListener
 	notificationTail chan struct{}
-	parentCtx        context.Context
-	run              *healthCheckRun
-	maxWorkers       int
+}
+
+type checkerLifecycle struct {
+	lifecycleMu sync.Mutex
+	parentCtx   context.Context
+	run         *healthCheckRun
 }
 
 type healthCheckRun struct {
@@ -103,12 +115,12 @@ type HealthListener func(nodeID string, healthy bool)
 
 func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
 	return &DefaultHealthChecker{
-		config:          config,
-		nodes:           make(map[string]Node),
-		nodeGenerations: make(map[string]uint64),
-		nodeStats:       make(map[string]*NodeHealthStats),
-		healthListeners: make([]HealthListener, 0),
-		maxWorkers:      10,
+		checkerState: checkerState{
+			config: config, nodes: make(map[string]Node),
+			nodeGenerations: make(map[string]uint64), nodeStats: make(map[string]*NodeHealthStats),
+		},
+		checkerBroadcaster: checkerBroadcaster{healthListeners: make([]HealthListener, 0)},
+		maxWorkers:         10,
 	}
 }
 
@@ -422,17 +434,20 @@ type HealthAwarePoolStats struct {
 
 // HealthAwarePool wraps a Locator with health checking capabilities.
 type HealthAwarePool struct {
-	Locator
-	locatorMu      sync.RWMutex
 	monitorMu      sync.Mutex
 	healthChecker  HealthChecker
-	healthyNodes   map[string]bool
+	snapshot       atomic.Pointer[poolSnapshot]
 	mu             sync.RWMutex
 	closed         bool
 	monitorStarted bool
 	closeOnce      sync.Once
 	closeErr       error
 	logger         atomic.Pointer[slog.Logger]
+}
+
+type poolSnapshot struct {
+	locator      Locator
+	healthyNodes map[string]bool
 }
 
 // NewHealthAwarePool creates a new health-aware locator with a default health checker.
@@ -444,18 +459,18 @@ func NewHealthAwarePool(locator Locator, config HealthCheckerConfig) *HealthAwar
 // NewHealthAwarePoolWithChecker creates a new health-aware locator with an injected health checker.
 func NewHealthAwarePoolWithChecker(locator Locator, healthChecker HealthChecker) *HealthAwarePool {
 	hap := &HealthAwarePool{
-		Locator:       locator,
 		healthChecker: healthChecker,
-		healthyNodes:  make(map[string]bool),
 	}
 	hap.logger.Store(discardLogger)
+	healthyNodes := make(map[string]bool)
 
 	for _, node := range locator.GetAllNodes() {
-		hap.healthyNodes[node.ID()] = true
+		healthyNodes[node.ID()] = true
 		if healthChecker != nil {
 			healthChecker.AddNode(node)
 		}
 	}
+	hap.snapshot.Store(&poolSnapshot{locator: locator, healthyNodes: healthyNodes})
 
 	// The health listener is registered in StartHealthMonitoring, not here,
 	// to avoid double-registering it if StartHealthMonitoring runs later.
@@ -481,33 +496,56 @@ func (hap *HealthAwarePool) log() *slog.Logger {
 }
 
 func (hap *HealthAwarePool) currentLocator() Locator {
-	hap.locatorMu.RLock()
-	defer hap.locatorMu.RUnlock()
-	return hap.Locator
+	if snapshot := hap.snapshot.Load(); snapshot != nil {
+		return snapshot.locator
+	}
+	return nil
+}
+
+func (hap *HealthAwarePool) currentSnapshot() *poolSnapshot {
+	return hap.snapshot.Load()
+}
+
+func cloneHealthNodes(nodes map[string]bool) map[string]bool {
+	clone := make(map[string]bool, len(nodes))
+	for id, healthy := range nodes {
+		clone[id] = healthy
+	}
+	return clone
 }
 
 // GetReplicas returns replicas from the currently active locator.
 func (hap *HealthAwarePool) GetReplicas(ctx context.Context, key string, count int) ([]Node, error) {
-	return hap.currentLocator().GetReplicas(ctx, key, count)
+	locator := hap.currentLocator()
+	if locator == nil {
+		return nil, ErrLocatorClosed
+	}
+	return locator.GetReplicas(ctx, key, count)
 }
 
 // GetAllNodes returns nodes from the currently active locator.
 func (hap *HealthAwarePool) GetAllNodes() []Node {
-	return hap.currentLocator().GetAllNodes()
+	locator := hap.currentLocator()
+	if locator == nil {
+		return nil
+	}
+	return locator.GetAllNodes()
 }
 
 // Get retrieves a healthy node for the given key.
 func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
-	locator := hap.currentLocator()
+	snapshot := hap.currentSnapshot()
+	locator := snapshot.locator
+	if locator == nil {
+		return nil, ErrLocatorClosed
+	}
 	node, err := locator.Get(ctx, key)
 	if err != nil {
 		return nil, err
 	}
 
 	// Cheap check against cached health state; no network I/O here.
-	hap.mu.RLock()
-	isHealthy, exists := hap.healthyNodes[node.ID()]
-	hap.mu.RUnlock()
+	isHealthy, exists := snapshot.healthyNodes[node.ID()]
 
 	if !exists || isHealthy {
 		return node, nil
@@ -532,17 +570,14 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 		return nil, err
 	}
 
-	hap.mu.RLock()
 	for _, replica := range replicas {
 		if replica.ID() == node.ID() {
 			continue // already known unhealthy
 		}
-		if healthy, exists := hap.healthyNodes[replica.ID()]; !exists || healthy {
-			hap.mu.RUnlock()
+		if healthy, exists := snapshot.healthyNodes[replica.ID()]; !exists || healthy {
 			return replica, nil
 		}
 	}
-	hap.mu.RUnlock()
 
 	// Every replica is unhealthy too; return the primary and let the caller decide.
 	return node, nil
@@ -573,7 +608,10 @@ func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 			hap.mu.Unlock()
 			return
 		}
-		hap.healthyNodes[nodeID] = healthy
+		snapshot := hap.currentSnapshot()
+		nodes := cloneHealthNodes(snapshot.healthyNodes)
+		nodes[nodeID] = healthy
+		hap.snapshot.Store(&poolSnapshot{locator: snapshot.locator, healthyNodes: nodes})
 		hap.mu.Unlock()
 
 		hap.log().Info("node health changed", "node_id", nodeID, "healthy", healthy)
@@ -584,32 +622,53 @@ func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 
 // AddNodeContext adds a node to both the locator and health monitoring.
 func (hap *HealthAwarePool) AddNodeContext(ctx context.Context, node Node) error {
-	if err := hap.currentLocator().AddNodeContext(ctx, node); err != nil {
+	hap.monitorMu.Lock()
+	defer hap.monitorMu.Unlock()
+	locator := hap.currentLocator()
+	if locator == nil {
+		return ErrLocatorClosed
+	}
+	if err := locator.AddNodeContext(ctx, node); err != nil {
 		return err
 	}
 
 	hap.healthChecker.AddNode(node)
 
-	hap.mu.Lock()
-	hap.healthyNodes[node.ID()] = true
-	hap.mu.Unlock()
+	hap.updateNodeHealth(node.ID(), true)
 
 	return nil
 }
 
 // RemoveNodeContext removes a node from both the locator and health monitoring.
 func (hap *HealthAwarePool) RemoveNodeContext(ctx context.Context, nodeID string) error {
-	if err := hap.currentLocator().RemoveNodeContext(ctx, nodeID); err != nil {
+	hap.monitorMu.Lock()
+	defer hap.monitorMu.Unlock()
+	locator := hap.currentLocator()
+	if locator == nil {
+		return ErrLocatorClosed
+	}
+	if err := locator.RemoveNodeContext(ctx, nodeID); err != nil {
 		return err
 	}
 
 	hap.healthChecker.RemoveNode(nodeID)
 
-	hap.mu.Lock()
-	delete(hap.healthyNodes, nodeID)
-	hap.mu.Unlock()
+	hap.updateNodeHealth(nodeID, true)
 
 	return nil
+}
+
+func (hap *HealthAwarePool) updateNodeHealth(nodeID string, healthy bool) {
+	hap.mu.Lock()
+	defer hap.mu.Unlock()
+	snapshot := hap.currentSnapshot()
+	nodes := cloneHealthNodes(snapshot.healthyNodes)
+	if healthy {
+		nodes[nodeID] = true
+	} else {
+		delete(nodes, nodeID)
+	}
+	hap.snapshot.Store(&poolSnapshot{locator: snapshot.locator, healthyNodes: nodes})
 }
 
 // StopHealthMonitoring stops health monitoring.
@@ -637,11 +696,10 @@ func (hap *HealthAwarePool) GetHealthCheckerConfig() HealthCheckerConfig {
 
 // GetHealthyNodeCount returns the number of currently healthy nodes
 func (hap *HealthAwarePool) GetHealthyNodeCount() int {
-	hap.mu.RLock()
-	defer hap.mu.RUnlock()
+	snapshot := hap.currentSnapshot()
 
 	count := 0
-	for _, healthy := range hap.healthyNodes {
+	for _, healthy := range snapshot.healthyNodes {
 		if healthy {
 			count++
 		}
@@ -651,11 +709,10 @@ func (hap *HealthAwarePool) GetHealthyNodeCount() int {
 
 // GetUnhealthyNodeCount returns the number of currently unhealthy nodes
 func (hap *HealthAwarePool) GetUnhealthyNodeCount() int {
-	hap.mu.RLock()
-	defer hap.mu.RUnlock()
+	snapshot := hap.currentSnapshot()
 
 	count := 0
-	for _, healthy := range hap.healthyNodes {
+	for _, healthy := range snapshot.healthyNodes {
 		if !healthy {
 			count++
 		}
@@ -665,11 +722,9 @@ func (hap *HealthAwarePool) GetUnhealthyNodeCount() int {
 
 // GetHealthStatus returns the health status of all nodes
 func (hap *HealthAwarePool) GetHealthStatus() map[string]bool {
-	hap.mu.RLock()
-	defer hap.mu.RUnlock()
-
-	status := make(map[string]bool, len(hap.healthyNodes))
-	for nodeID, healthy := range hap.healthyNodes {
+	snapshot := hap.currentSnapshot()
+	status := make(map[string]bool, len(snapshot.healthyNodes))
+	for nodeID, healthy := range snapshot.healthyNodes {
 		status[nodeID] = healthy
 	}
 	return status
@@ -677,20 +732,16 @@ func (hap *HealthAwarePool) GetHealthStatus() map[string]bool {
 
 // IsNodeHealthy returns whether a specific node is healthy
 func (hap *HealthAwarePool) IsNodeHealthy(nodeID string) bool {
-	hap.mu.RLock()
-	defer hap.mu.RUnlock()
-
-	healthy, exists := hap.healthyNodes[nodeID]
+	snapshot := hap.currentSnapshot()
+	healthy, exists := snapshot.healthyNodes[nodeID]
 	return !exists || healthy // unknown nodes are assumed healthy
 }
 
 // GetStats returns statistics about the health-aware pool including health status.
 func (hap *HealthAwarePool) GetStats() HealthAwarePoolStats {
-	hap.mu.RLock()
-	defer hap.mu.RUnlock()
-
-	stats := HealthAwarePoolStats{TotalNodes: len(hap.healthyNodes)}
-	for _, healthy := range hap.healthyNodes {
+	snapshot := hap.currentSnapshot()
+	stats := HealthAwarePoolStats{TotalNodes: len(snapshot.healthyNodes)}
+	for _, healthy := range snapshot.healthyNodes {
 		if healthy {
 			stats.HealthyNodes++
 		} else {
@@ -737,16 +788,12 @@ func (hap *HealthAwarePool) ReplaceLocator(newLocator Locator) error {
 		newNodeIDs[node.ID()] = struct{}{}
 	}
 
-	hap.locatorMu.Lock()
-	hap.Locator = newLocator
-	hap.locatorMu.Unlock()
+	hap.mu.Lock()
+	hap.snapshot.Store(&poolSnapshot{locator: newLocator, healthyNodes: newHealthyNodes})
+	hap.mu.Unlock()
 	if setter, ok := newLocator.(interface{ SetLogger(*slog.Logger) }); ok {
 		setter.SetLogger(hap.log())
 	}
-
-	hap.mu.Lock()
-	hap.healthyNodes = newHealthyNodes
-	hap.mu.Unlock()
 
 	for _, node := range oldNodes {
 		if _, stillPresent := newNodeIDs[node.ID()]; !stillPresent {
@@ -771,6 +818,7 @@ func (hap *HealthAwarePool) Close() error {
 	hap.closeOnce.Do(func() {
 		hap.monitorMu.Lock()
 		defer hap.monitorMu.Unlock()
+		oldLocator := hap.currentLocator()
 		hap.mu.Lock()
 		hap.closed = true
 		hap.mu.Unlock()
@@ -778,7 +826,10 @@ func (hap *HealthAwarePool) Close() error {
 		// The health checker invokes listeners asynchronously. Mark the pool
 		// closed before stopping the checker so late callbacks are ignored.
 		hap.StopHealthMonitoring()
-		hap.closeErr = hap.currentLocator().Close()
+		hap.snapshot.Store(&poolSnapshot{locator: nil, healthyNodes: map[string]bool{}})
+		if oldLocator != nil {
+			hap.closeErr = oldLocator.Close()
+		}
 	})
 
 	return hap.closeErr

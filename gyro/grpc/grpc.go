@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/routed"
 )
 
 type GRPCConnection interface {
@@ -243,7 +244,7 @@ func DefaultGRPCClientConfig() *GRPCClientConfig {
 type GRPCClient struct {
 	locator gyro.Locator
 	config  *GRPCClientConfig
-	cancel  context.CancelFunc
+	runtime *routed.Runtime
 }
 
 // NewGRPCClient creates a client-side sharded gRPC cluster client. Each
@@ -266,41 +267,14 @@ func newGRPCClient(addresses []string, config *GRPCClientConfig, factory *GRPCNo
 		return nil, fmt.Errorf("invalid health checker config: %w", err)
 	}
 
-	locator, err := gyro.NewConsistentLocator(config.Locator)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create connection locator: %w", err)
-	}
-
 	if factory == nil {
 		factory = &GRPCNodeFactory{config: config, newConnection: NewGRPCConnection}
 	}
-	for i, addr := range addresses {
-		node, err := factory.CreateNode(gyro.NodeInfo{
-			ID:      fmt.Sprintf("grpc-%d", i+1),
-			Address: addr,
-		})
-		if err != nil {
-			_ = locator.Close()
-			return nil, fmt.Errorf("failed to create node for %s: %w", addr, err)
-		}
-		if err := locator.AddNodeContext(context.Background(), node); err != nil {
-			_ = node.Close()
-			_ = locator.Close()
-			return nil, fmt.Errorf("failed to add node for %s: %w", addr, err)
-		}
+	runtime, err := routed.New(addresses, config.Locator, config.HealthChecker, "grpc", factory.CreateNode, healthChecker)
+	if err != nil {
+		return nil, err
 	}
-	if healthChecker == nil {
-		healthChecker = gyro.NewDefaultHealthChecker(config.HealthChecker)
-	}
-	healthAwarePool := gyro.NewHealthAwarePoolWithChecker(locator, healthChecker)
-	healthCtx, cancel := context.WithCancel(context.Background())
-	healthAwarePool.StartHealthMonitoring(healthCtx)
-
-	return &GRPCClient{
-		locator: healthAwarePool,
-		config:  config,
-		cancel:  cancel,
-	}, nil
+	return &GRPCClient{locator: runtime.Locator(), config: config, runtime: runtime}, nil
 }
 
 // GetClientForKey returns the native gRPC client for the given key.
@@ -335,53 +309,29 @@ func (gc *GRPCClient) GetNodeForKey(ctx context.Context, key string) (gyro.Node,
 
 // GetClientsForReplicas returns native gRPC clients for replica nodes.
 func (gc *GRPCClient) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]any, error) {
-	nodes, err := gc.locator.GetReplicas(ctx, key, replicaCount)
+	clients, err := gc.runtime.Replicas(ctx, key, replicaCount, grpcNativeClient)
 	if err != nil {
 		return nil, fmt.Errorf("gyro: failed to get replicas for key '%s': %w", key, err)
 	}
-
-	clients := make([]any, 0, len(nodes))
-	for _, node := range nodes {
-		grpcNode, ok := node.(*GRPCNode)
-		if !ok {
-			continue // Skip non-gRPC nodes
-		}
-
-		nativeClient := grpcNode.GetNativeClient()
-		if nativeClient != nil {
-			clients = append(clients, nativeClient)
-		}
-	}
-
 	return clients, nil
 }
 
 // GetAllClients returns native gRPC clients for all nodes.
 func (gc *GRPCClient) GetAllClients() map[string]any {
-	nodes := gc.locator.GetAllNodes()
-	clients := make(map[string]any)
+	return gc.runtime.All(grpcNativeClient)
+}
 
-	for _, node := range nodes {
-		grpcNode, ok := node.(*GRPCNode)
-		if !ok {
-			continue // Skip non-gRPC nodes
-		}
-
-		nativeClient := grpcNode.GetNativeClient()
-		if nativeClient != nil {
-			clients[node.ID()] = nativeClient
-		}
+func grpcNativeClient(node gyro.Node) (any, bool) {
+	grpcNode, ok := node.(*GRPCNode)
+	if !ok {
+		return nil, false
 	}
-
-	return clients
+	return grpcNode.GetNativeClient(), true
 }
 
 // Close closes all connections and releases resources.
 func (gc *GRPCClient) Close() error {
-	if gc.cancel != nil {
-		gc.cancel()
-	}
-	return gc.locator.Close()
+	return gc.runtime.Close()
 }
 
 func NewGRPCCluster(addresses []string) (*GRPCClient, error) {
