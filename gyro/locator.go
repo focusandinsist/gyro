@@ -11,13 +11,6 @@ import (
 	"github.com/focusandinsist/consistent-go/consistent"
 )
 
-type Node interface {
-	ID() string
-	Address() string
-	IsHealthy(ctx context.Context) bool
-	Close() error
-}
-
 var ErrLocatorClosed = errors.New("locator is closed")
 
 type Locator interface {
