@@ -60,48 +60,6 @@ type clientState struct {
 // added in Go 1.24) to stay compatible with the go.mod minimum version.
 var discardLogger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
 
-// NewClient creates a new client with dependency injection.
-func NewClient(serviceName string, discovery ServiceDiscovery, configManager *ConfigManager, nodeFactory NodeFactory, healthChecker HealthChecker) (*Client, error) {
-	if serviceName == "" {
-		return nil, fmt.Errorf("service name cannot be empty")
-	}
-	if discovery == nil {
-		return nil, fmt.Errorf("service discovery cannot be nil")
-	}
-	if configManager == nil {
-		return nil, fmt.Errorf("config manager cannot be nil")
-	}
-	if nodeFactory == nil {
-		return nil, fmt.Errorf("node factory cannot be nil")
-	}
-	if healthChecker == nil {
-		return nil, fmt.Errorf("health checker cannot be nil")
-	}
-
-	client := &Client{
-		deps: clientDeps{
-			serviceName:   serviceName,
-			discovery:     discovery,
-			configManager: configManager,
-			nodeFactory:   nodeFactory,
-			healthChecker: healthChecker,
-		},
-		state: clientState{
-			nodeInfos:   make(map[string]NodeInfo),
-			nodeFactory: nodeFactory,
-			// False until watchServiceNodes establishes its first watch.
-			serviceDiscoveryHealthy: false,
-		},
-	}
-	client.logger.Store(discardLogger)
-
-	if err := client.initialize(); err != nil {
-		return nil, fmt.Errorf("failed to initialize client: %w", err)
-	}
-
-	return client, nil
-}
-
 // SetLogger overrides the logger used for internal diagnostics (node churn,
 // service discovery retries, config reloads). Passing nil restores the
 // default no-op logger. Call this before Start so the logger also reaches

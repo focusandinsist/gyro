@@ -206,7 +206,7 @@ func (hc *DefaultHealthChecker) StopMonitoring() {
 	hc.stopRun()
 }
 
-// UpdateConfig updates the health checker configuration dynamically
+// UpdateConfig updates the health checker configuration dynamically.
 func (hc *DefaultHealthChecker) UpdateConfig(newConfig HealthCheckerConfig) error {
 	if err := ValidateHealthCheckerConfig(newConfig); err != nil {
 		return err
@@ -230,14 +230,14 @@ func (hc *DefaultHealthChecker) UpdateConfig(newConfig HealthCheckerConfig) erro
 	return nil
 }
 
-// GetConfig returns the current configuration
+// GetConfig returns the current configuration.
 func (hc *DefaultHealthChecker) GetConfig() HealthCheckerConfig {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
 	return hc.config
 }
 
-// IsEnabled returns whether health checking is enabled
+// IsEnabled returns whether health checking is enabled.
 func (hc *DefaultHealthChecker) IsEnabled() bool {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()

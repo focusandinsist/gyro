@@ -11,8 +11,6 @@ import (
 	"github.com/focusandinsist/consistent-go/consistent"
 )
 
-var ErrLocatorClosed = errors.New("locator is closed")
-
 // Locator routes keys to nodes and owns node membership and shutdown.
 type Locator interface {
 	Get(ctx context.Context, key string) (Node, error)
@@ -22,6 +20,8 @@ type Locator interface {
 	GetAllNodes() []Node
 	Close() error
 }
+
+var ErrLocatorClosed = errors.New("locator is closed")
 
 // LocatorConfig controls the consistent-hash ring layout.
 type LocatorConfig struct {
