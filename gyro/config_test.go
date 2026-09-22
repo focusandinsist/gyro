@@ -7,7 +7,7 @@ import (
 )
 
 func TestConfigManagerConcurrentUpdatesAreSerialized(t *testing.T) {
-	initial := DefaultClientConfig()
+	initial := DefaultConfig()
 	initial.Locator.PartitionCount = 100
 	manager := NewConfigManager(initial)
 
@@ -15,7 +15,7 @@ func TestConfigManagerConcurrentUpdatesAreSerialized(t *testing.T) {
 	releaseFirst := make(chan struct{})
 	secondEntered := make(chan struct{})
 	releaseSecond := make(chan struct{})
-	manager.AddConfigWatcher(func(_, next *ClientConfig) error {
+	manager.AddConfigWatcher(func(_, next *Config) error {
 		switch next.Locator.PartitionCount {
 		case 101:
 			close(firstEntered)

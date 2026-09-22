@@ -9,7 +9,7 @@ import (
 func newLifecycleTestClient(t *testing.T) (*Client, *ConfigManager, *MockNodeFactory) {
 	t.Helper()
 
-	config := DefaultClientConfig()
+	config := DefaultConfig()
 	config.HealthChecker.Enabled = false
 	configManager := NewConfigManager(config)
 	discovery := NewMockServiceDiscovery([]NodeInfo{
@@ -172,7 +172,7 @@ func TestClientConfigReloadReplacesAndClosesOldLocator(t *testing.T) {
 }
 
 func TestClientConfigReloadKeepsHealthMonitoringActive(t *testing.T) {
-	config := DefaultClientConfig()
+	config := DefaultConfig()
 	config.HealthChecker = HealthCheckerConfig{
 		Enabled:           true,
 		Interval:          5 * time.Millisecond,

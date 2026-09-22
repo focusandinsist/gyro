@@ -10,13 +10,13 @@ import (
 type ConfigManager struct {
 	mu       sync.RWMutex
 	updateMu sync.Mutex
-	config   *ClientConfig
+	config   *Config
 	watchers []ConfigWatcher
 }
 
-// ClientConfig is the configuration for Gyro clients, composed of the
+// Config is the configuration for Gyro clients, composed of the
 // individual component configs below.
-type ClientConfig struct {
+type Config struct {
 	Locator       LocatorConfig       `json:"locator"`
 	HealthChecker HealthCheckerConfig `json:"health_checker"`
 	Connection    ConnectionConfig    `json:"connection"`
@@ -32,6 +32,7 @@ type ConnectionConfig struct {
 	WriteTimeout   time.Duration `json:"write_timeout"`
 }
 
+// DefaultConnectionConfig returns connection defaults suitable for adapters.
 func DefaultConnectionConfig() ConnectionConfig {
 	return ConnectionConfig{
 		MaxIdleConns:   10,
@@ -43,8 +44,9 @@ func DefaultConnectionConfig() ConnectionConfig {
 	}
 }
 
-func DefaultClientConfig() *ClientConfig {
-	return &ClientConfig{
+// DefaultConfig returns a complete configuration with the default component settings.
+func DefaultConfig() *Config {
+	return &Config{
 		Locator:       DefaultLocatorConfig(),
 		HealthChecker: DefaultHealthCheckerConfig(),
 		Connection:    DefaultConnectionConfig(),
@@ -52,30 +54,30 @@ func DefaultClientConfig() *ClientConfig {
 }
 
 // ConfigWatcher is called when configuration changes.
-type ConfigWatcher func(oldConfig, newConfig *ClientConfig) error
+type ConfigWatcher func(oldConfig, newConfig *Config) error
 
 // NewConfigManager creates a new configuration manager.
-func NewConfigManager(config *ClientConfig) *ConfigManager {
+func NewConfigManager(config *Config) *ConfigManager {
 	if config == nil {
-		config = DefaultClientConfig()
+		config = DefaultConfig()
 	}
 
 	return &ConfigManager{
-		config:   cloneClientConfig(config),
+		config:   cloneConfig(config),
 		watchers: make([]ConfigWatcher, 0),
 	}
 }
 
 // GetConfig returns the current configuration.
-func (cm *ConfigManager) GetConfig() *ClientConfig {
+func (cm *ConfigManager) GetConfig() *Config {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
-	return cloneClientConfig(cm.config)
+	return cloneConfig(cm.config)
 }
 
 // UpdateConfig updates the configuration and notifies watchers.
-func (cm *ConfigManager) UpdateConfig(newConfig *ClientConfig) error {
+func (cm *ConfigManager) UpdateConfig(newConfig *Config) error {
 	if newConfig == nil {
 		return fmt.Errorf("new config cannot be nil")
 	}
@@ -88,25 +90,25 @@ func (cm *ConfigManager) UpdateConfig(newConfig *ClientConfig) error {
 	defer cm.updateMu.Unlock()
 
 	cm.mu.RLock()
-	oldConfig := cloneClientConfig(cm.config)
+	oldConfig := cloneConfig(cm.config)
 	watchers := make([]ConfigWatcher, len(cm.watchers))
 	copy(watchers, cm.watchers)
 	cm.mu.RUnlock()
 
 	for _, watcher := range watchers {
-		if err := watcher(cloneClientConfig(oldConfig), cloneClientConfig(newConfig)); err != nil {
+		if err := watcher(cloneConfig(oldConfig), cloneConfig(newConfig)); err != nil {
 			return fmt.Errorf("config watcher failed: %w", err)
 		}
 	}
 
 	cm.mu.Lock()
-	cm.config = cloneClientConfig(newConfig)
+	cm.config = cloneConfig(newConfig)
 	cm.mu.Unlock()
 
 	return nil
 }
 
-func cloneClientConfig(config *ClientConfig) *ClientConfig {
+func cloneConfig(config *Config) *Config {
 	if config == nil {
 		return nil
 	}

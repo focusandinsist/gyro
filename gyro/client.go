@@ -7,15 +7,20 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
-// discardLogger is the default logger for internal components: it never
-// produces output, so a library consumer that doesn't call SetLogger sees
-// nothing on stdout/stderr. Built manually (rather than via slog.DiscardHandler,
-// added in Go 1.24) to stay compatible with the go.mod minimum version.
-var discardLogger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
+// Client coordinates routing, service discovery, health monitoring, and
+// lifecycle transitions for a configured set of backend nodes.
+type Client struct {
+	stateMu     sync.RWMutex
+	lifecycleMu sync.Mutex
+	deps        clientDeps
+	state       clientState
+	logger      atomic.Pointer[slog.Logger]
+}
 
+// clientDeps holds the immutable dependencies supplied when a Client is built.
+// Keeping them separate from clientState makes runtime transitions explicit.
 type clientDeps struct {
 	serviceName   string
 	discovery     ServiceDiscovery
@@ -24,12 +29,18 @@ type clientDeps struct {
 	healthChecker HealthChecker
 }
 
+// clientRun is the owned runtime instance for one Start-to-Stop interval.
+// A new instance is created on every restart so old goroutines cannot publish
+// into a later run.
 type clientRun struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	pool   *HealthAwarePool
 }
 
+// clientState contains mutable runtime data protected by Client.stateMu.
+// The run and prepared fields represent the active and not-yet-started pool;
+// nodeInfos and health fields are the latest published snapshots.
 type clientState struct {
 	run           *clientRun
 	prepared      *HealthAwarePool
@@ -41,17 +52,13 @@ type clientState struct {
 	serviceDiscoveryHealthy   bool
 	lastServiceDiscoveryError string
 	serviceDiscoveryRetries   int
-	lastHealthCheck           time.Time
 }
 
-// Client provides configuration and service discovery.
-type Client struct {
-	stateMu     sync.RWMutex
-	lifecycleMu sync.Mutex
-	deps        clientDeps
-	state       clientState
-	logger      atomic.Pointer[slog.Logger]
-}
+// discardLogger is the default logger for internal components: it never
+// produces output, so a library consumer that doesn't call SetLogger sees
+// nothing on stdout/stderr. Built manually (rather than via slog.DiscardHandler,
+// added in Go 1.24) to stay compatible with the go.mod minimum version.
+var discardLogger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
 
 // NewClient creates a new client with dependency injection.
 func NewClient(serviceName string, discovery ServiceDiscovery, configManager *ConfigManager, nodeFactory NodeFactory, healthChecker HealthChecker) (*Client, error) {
@@ -123,7 +130,7 @@ func (c *Client) log() *slog.Logger {
 
 // buildLocatorUnsafe builds a locator from a configuration snapshot without
 // publishing it. Discovery and node construction happen outside Client locks.
-func (c *Client) buildLocatorUnsafe(config *ClientConfig, nodeFactory NodeFactory) (Locator, []NodeInfo, error) {
+func (c *Client) buildLocatorUnsafe(config *Config, nodeFactory NodeFactory) (Locator, []NodeInfo, error) {
 	ctx := context.Background()
 
 	nodeInfos, err := c.deps.discovery.Discover(ctx, c.deps.serviceName)
@@ -192,7 +199,7 @@ func (c *Client) initialize() error {
 	return nil
 }
 
-// getLocator returns the underlying locator
+// getLocator returns the active underlying locator.
 func (c *Client) getLocator() Locator {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
@@ -200,13 +207,4 @@ func (c *Client) getLocator() Locator {
 		return nil
 	}
 	return c.state.run.pool
-}
-
-// getPoolNodes returns all nodes from the locator
-func (c *Client) getPoolNodes() []Node {
-	locator := c.getLocator()
-	if locator == nil {
-		return nil
-	}
-	return locator.GetAllNodes()
 }

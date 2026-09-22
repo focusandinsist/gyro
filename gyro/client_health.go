@@ -6,6 +6,14 @@ import (
 	"time"
 )
 
+// ClientHealth represents the health status of a client.
+type ClientHealth struct {
+	ServiceDiscoveryHealthy   bool      `json:"service_discovery_healthy"`
+	LastServiceDiscoveryError string    `json:"last_service_discovery_error,omitempty"`
+	ServiceDiscoveryRetries   int       `json:"service_discovery_retries"`
+	LastHealthCheck           time.Time `json:"last_health_check"`
+}
+
 // Health returns the current health status of the client.
 func (c *Client) Health() *ClientHealth {
 	lastHealthCheck := c.lastHealthCheckTime()

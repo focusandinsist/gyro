@@ -65,7 +65,7 @@ discovery := gyro.NewStaticServiceDiscovery([]string{
 	"127.0.0.1:6379", "127.0.0.1:6380", "127.0.0.1:6381",
 }) // 换成自己的 ServiceDiscovery 实现即可接入真实注册中心
 
-configManager := gyro.NewConfigManager(gyro.DefaultClientConfig())
+configManager := gyro.NewConfigManager(gyro.DefaultConfig())
 nodeFactory := redisadapter.NewRedisNodeFactory()
 healthChecker := gyro.NewDefaultHealthChecker(gyro.DefaultHealthCheckerConfig())
 
@@ -98,6 +98,10 @@ gyro/
 │   └── grpc/              # gRPC 适配器(grpc-go)
 └── docs/                  # 详细文档
 ```
+
+核心包的入口导航在 `gyro/gyro.go`；公开节点接口在 `gyro/node.go`，根配置在
+`gyro/config.go`。动态 Client 的生命周期、拓扑和健康实现分别位于对应的
+`client_*` 文件中。
 
 一致性哈希算法本身已经抽成独立的库:[focusandinsist/consistent-go](https://github.com/focusandinsist/consistent-go)。
 

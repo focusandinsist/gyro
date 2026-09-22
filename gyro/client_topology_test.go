@@ -54,7 +54,7 @@ func (n *clientLockCheckingNode) Close() error {
 }
 
 func TestClientTopologyReconcileDoesNotHoldStateLockDuringNodeIO(t *testing.T) {
-	config := DefaultClientConfig()
+	config := DefaultConfig()
 	config.HealthChecker.Enabled = false
 	factory := &clientLockCheckingFactory{}
 	client, err := NewClient(
@@ -72,12 +72,15 @@ func TestClientTopologyReconcileDoesNotHoldStateLockDuringNodeIO(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+	client.stateMu.RLock()
+	run := client.state.run
+	client.stateMu.RUnlock()
 
-	client.handleServiceNodesChange(context.Background(), []NodeInfo{
+	client.reconcileServiceNodes(run, []NodeInfo{
 		{ID: "node-1", Address: "node-1"},
 		{ID: "node-2", Address: "node-2"},
 	})
-	client.handleServiceNodesChange(context.Background(), []NodeInfo{
+	client.reconcileServiceNodes(run, []NodeInfo{
 		{ID: "node-2", Address: "node-2"},
 	})
 
@@ -96,7 +99,7 @@ func TestClientTopologyReconcileDoesNotHoldStateLockDuringNodeIO(t *testing.T) {
 }
 
 func TestClientTopologyReconcileRebuildsNodeWhenMetadataChanges(t *testing.T) {
-	config := DefaultClientConfig()
+	config := DefaultConfig()
 	config.HealthChecker.Enabled = false
 	factory := NewMockNodeFactory()
 	client, err := NewClient(
@@ -115,9 +118,12 @@ func TestClientTopologyReconcileRebuildsNodeWhenMetadataChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+	client.stateMu.RLock()
+	run := client.state.run
+	client.stateMu.RUnlock()
 
 	oldNode := factory.GetMockNode("node-1")
-	client.handleServiceNodesChange(context.Background(), []NodeInfo{{
+	client.reconcileServiceNodes(run, []NodeInfo{{
 		ID: "node-1", Address: "node-1", Metadata: map[string]string{"zone": "b"},
 	}})
 

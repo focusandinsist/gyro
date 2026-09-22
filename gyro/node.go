@@ -1,17 +1,6 @@
 package gyro
 
-import (
-	"context"
-	"time"
-)
-
-// ClientHealth represents the health status of the client.
-type ClientHealth struct {
-	ServiceDiscoveryHealthy   bool      `json:"service_discovery_healthy"`
-	LastServiceDiscoveryError string    `json:"last_service_discovery_error,omitempty"`
-	ServiceDiscoveryRetries   int       `json:"service_discovery_retries"`
-	LastHealthCheck           time.Time `json:"last_health_check"`
-}
+import "context"
 
 // NodeFactory creates nodes from NodeInfo.
 type NodeFactory interface {

@@ -1,7 +1,6 @@
 package gyro
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"time"
@@ -119,16 +118,6 @@ func (c *Client) processServiceWatch(run *clientRun, nodesCh <-chan []NodeInfo) 
 			}
 			c.reconcileServiceNodes(run, nodes)
 		}
-	}
-}
-
-// handleServiceNodesChange handles changes in service nodes with incremental updates.
-func (c *Client) handleServiceNodesChange(ctx context.Context, newNodeInfos []NodeInfo) {
-	c.stateMu.RLock()
-	run := c.state.run
-	c.stateMu.RUnlock()
-	if run != nil {
-		c.reconcileServiceNodes(run, newNodeInfos)
 	}
 }
 
@@ -259,7 +248,7 @@ func (c *Client) reconcileServiceNodes(run *clientRun, newNodeInfos []NodeInfo) 
 }
 
 // handleConfigChange handles configuration changes with incremental updates.
-func (c *Client) handleConfigChange(oldConfig, newConfig *ClientConfig) error {
+func (c *Client) handleConfigChange(oldConfig, newConfig *Config) error {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 

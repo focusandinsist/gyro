@@ -47,7 +47,7 @@ var _ gyro.HealthChecker = minimalHealthChecker{}
 var _ gyro.NodeFactory = contractNodeFactory{}
 
 func TestClientAcceptsReadOnlyDiscoveryAndMinimalHealthChecker(t *testing.T) {
-	config := gyro.DefaultClientConfig()
+	config := gyro.DefaultConfig()
 	config.HealthChecker.Enabled = false
 	client, err := gyro.NewClient(
 		"orders",
