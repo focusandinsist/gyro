@@ -29,7 +29,7 @@ import (
 
 func main() {
 	// 三个 Redis 节点,按一致性哈希分片
-	client, err := redisadapter.NewRedisCluster([]string{
+	client, err := redisadapter.NewCluster([]string{
 		"127.0.0.1:6379",
 		"127.0.0.1:6380",
 		"127.0.0.1:6381",
@@ -58,7 +58,7 @@ func main() {
 
 ### 需要动态服务发现 / 配置热更新时
 
-上面的 `NewRedisCluster` 是固定地址的便捷入口。如果节点列表会变化(比如接 Kubernetes Endpoints、注册中心),用更底层的依赖注入式 API:
+上面的 `NewCluster` 是固定地址的便捷入口。如果节点列表会变化(比如接 Kubernetes Endpoints、注册中心),用更底层的依赖注入式 API:
 
 ```go
 discovery := gyro.NewStaticServiceDiscovery([]string{
@@ -66,7 +66,7 @@ discovery := gyro.NewStaticServiceDiscovery([]string{
 }) // 换成自己的 ServiceDiscovery 实现即可接入真实注册中心
 
 configManager := gyro.NewConfigManager(gyro.DefaultConfig())
-nodeFactory := redisadapter.NewRedisNodeFactory()
+nodeFactory := redisadapter.NewNodeFactory()
 healthChecker := gyro.NewDefaultHealthChecker(gyro.DefaultHealthCheckerConfig())
 
 client, err := gyro.NewClient("user-cache", discovery, configManager, nodeFactory, healthChecker)

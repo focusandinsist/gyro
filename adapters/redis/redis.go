@@ -14,23 +14,23 @@ import (
 	"github.com/focusandinsist/gyro/internal/routed"
 )
 
-// RedisConnection a Redis connection interface.
-type RedisConnection interface {
+// Connection is the adapter connection abstraction.
+type Connection interface {
 	Ping(ctx context.Context) error
 	Close() error
 	IsConnected() bool
 	GetNativeClient() any
 }
 
-// DefaultRedisConnection wraps a real go-redis client.
-type DefaultRedisConnection struct {
+// DefaultConnection wraps a real go-redis client.
+type DefaultConnection struct {
 	address   string
 	client    *goredis.Client
 	connected atomic.Bool
 }
 
-// NewRedisConnection creates a new Redis connection.
-func NewRedisConnection(address string, config gyro.ConnectionConfig) (RedisConnection, error) {
+// NewConnection creates a connection backed by go-redis.
+func NewConnection(address string, config gyro.ConnectionConfig) (Connection, error) {
 	client := goredis.NewClient(&goredis.Options{
 		Addr:            address,
 		Protocol:        2, // for broader compatibility
@@ -42,7 +42,7 @@ func NewRedisConnection(address string, config gyro.ConnectionConfig) (RedisConn
 		ConnMaxIdleTime: config.IdleTimeout,
 	})
 
-	conn := &DefaultRedisConnection{
+	conn := &DefaultConnection{
 		address: address,
 		client:  client,
 	}
@@ -52,19 +52,19 @@ func NewRedisConnection(address string, config gyro.ConnectionConfig) (RedisConn
 }
 
 // Close closes the Redis connection.
-func (c *DefaultRedisConnection) Close() error {
+func (c *DefaultConnection) Close() error {
 	c.connected.Store(false)
 	return c.client.Close()
 }
 
 // IsConnected returns the last known connectivity state (cheap, no I/O).
 // Call Ping to actually verify and refresh this state.
-func (c *DefaultRedisConnection) IsConnected() bool {
+func (c *DefaultConnection) IsConnected() bool {
 	return c.connected.Load()
 }
 
 // Ping tests the connection against the real Redis server.
-func (c *DefaultRedisConnection) Ping(ctx context.Context) error {
+func (c *DefaultConnection) Ping(ctx context.Context) error {
 	if err := c.client.Ping(ctx).Err(); err != nil {
 		c.connected.Store(false)
 		return fmt.Errorf("redis ping to %s failed: %w", c.address, err)
@@ -75,36 +75,36 @@ func (c *DefaultRedisConnection) Ping(ctx context.Context) error {
 
 // GetNativeClient returns the underlying *redis.Client for direct use with
 // the full go-redis API.
-func (c *DefaultRedisConnection) GetNativeClient() any {
+func (c *DefaultConnection) GetNativeClient() any {
 	return c.client
 }
 
-// RedisNode adapts a Redis connection to the gyro.Node interface.
-type RedisNode struct {
+// Node adapts a Redis connection to the gyro.Node interface.
+type Node struct {
 	id      string
 	address string
-	conn    RedisConnection
+	conn    Connection
 	mu      sync.RWMutex
 	closed  bool
 }
 
-func NewRedisNode(id, address string, conn RedisConnection) *RedisNode {
-	return &RedisNode{
+func NewNode(id, address string, conn Connection) *Node {
+	return &Node{
 		id:      id,
 		address: address,
 		conn:    conn,
 	}
 }
 
-func (rn *RedisNode) ID() string {
+func (rn *Node) ID() string {
 	return rn.id
 }
 
-func (rn *RedisNode) Address() string {
+func (rn *Node) Address() string {
 	return rn.address
 }
 
-func (rn *RedisNode) IsHealthy(ctx context.Context) bool {
+func (rn *Node) IsHealthy(ctx context.Context) bool {
 	rn.mu.RLock()
 	closed := rn.closed
 	rn.mu.RUnlock()
@@ -115,7 +115,7 @@ func (rn *RedisNode) IsHealthy(ctx context.Context) bool {
 	return rn.conn.Ping(ctx) == nil
 }
 
-func (rn *RedisNode) Close() error {
+func (rn *Node) Close() error {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
 
@@ -126,7 +126,7 @@ func (rn *RedisNode) Close() error {
 	return rn.conn.Close()
 }
 
-func (rn *RedisNode) GetNativeClient() any {
+func (rn *Node) GetNativeClient() any {
 	rn.mu.RLock()
 	defer rn.mu.RUnlock()
 
@@ -137,40 +137,40 @@ func (rn *RedisNode) GetNativeClient() any {
 	return rn.conn.GetNativeClient()
 }
 
-type RedisClientConfig struct {
+type ClientConfig struct {
 	Locator       gyro.LocatorConfig       `json:"locator"`
 	HealthChecker gyro.HealthCheckerConfig `json:"health_checker"`
 	Connection    gyro.ConnectionConfig    `json:"connection"`
 }
 
-func DefaultRedisClientConfig() *RedisClientConfig {
-	return &RedisClientConfig{
+func DefaultClientConfig() *ClientConfig {
+	return &ClientConfig{
 		Locator:       gyro.DefaultLocatorConfig(),
 		HealthChecker: gyro.DefaultHealthCheckerConfig(),
 		Connection:    gyro.DefaultConnectionConfig(),
 	}
 }
 
-// RedisClient routes requests to Redis cluster nodes.
-type RedisClient struct {
+// Client routes requests to Redis cluster nodes.
+type Client struct {
 	locator gyro.Locator
-	config  *RedisClientConfig
+	config  *ClientConfig
 	runtime *routed.Runtime
 }
 
-// NewRedisClient creates a client-side sharded Redis cluster client. Each
+// NewClient creates a client-side sharded Redis cluster client. Each
 // address gets its own go-redis connection; routing between them is done
 // via consistent hashing.
-func NewRedisClient(addresses []string, config *RedisClientConfig) (*RedisClient, error) {
-	return newRedisClient(addresses, config, nil, nil)
+func NewClient(addresses []string, config *ClientConfig) (*Client, error) {
+	return newClient(addresses, config, nil, nil)
 }
 
-func newRedisClient(addresses []string, config *RedisClientConfig, factory *RedisNodeFactory, healthChecker gyro.HealthChecker) (*RedisClient, error) {
+func newClient(addresses []string, config *ClientConfig, factory *NodeFactory, healthChecker gyro.HealthChecker) (*Client, error) {
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("at least one Redis address is required")
 	}
 	if config == nil {
-		config = DefaultRedisClientConfig()
+		config = DefaultClientConfig()
 	}
 	configSnapshot := *config
 	config = &configSnapshot
@@ -179,22 +179,22 @@ func newRedisClient(addresses []string, config *RedisClientConfig, factory *Redi
 	}
 
 	if factory == nil {
-		factory = &RedisNodeFactory{config: config, newConnection: NewRedisConnection}
+		factory = &NodeFactory{config: config, newConnection: NewConnection}
 	}
 	runtime, err := routed.New(addresses, config.Locator, config.HealthChecker, "redis", factory.CreateNode, healthChecker)
 	if err != nil {
 		return nil, err
 	}
-	return &RedisClient{locator: runtime.Locator(), config: config, runtime: runtime}, nil
+	return &Client{locator: runtime.Locator(), config: config, runtime: runtime}, nil
 }
 
-func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (any, error) {
+func (rc *Client) GetClientForKey(ctx context.Context, key string) (any, error) {
 	node, err := rc.GetNodeForKey(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node for key '%s': %w", key, err)
 	}
 
-	redisNode, ok := node.(*RedisNode)
+	redisNode, ok := node.(*Node)
 	if !ok {
 		return nil, fmt.Errorf("node %s is not a Redis node", node.ID())
 	}
@@ -208,7 +208,7 @@ func (rc *RedisClient) GetClientForKey(ctx context.Context, key string) (any, er
 }
 
 // GetNodeForKey returns the routed node metadata for observability and tests.
-func (rc *RedisClient) GetNodeForKey(ctx context.Context, key string) (gyro.Node, error) {
+func (rc *Client) GetNodeForKey(ctx context.Context, key string) (gyro.Node, error) {
 	node, err := rc.locator.Get(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("gyro: failed to get node for key '%s': %w", key, err)
@@ -216,20 +216,20 @@ func (rc *RedisClient) GetNodeForKey(ctx context.Context, key string) (gyro.Node
 	return node, nil
 }
 
-func (rc *RedisClient) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]any, error) {
-	clients, err := rc.runtime.Replicas(ctx, key, replicaCount, redisNativeClient)
+func (rc *Client) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]any, error) {
+	clients, err := rc.runtime.Replicas(ctx, key, replicaCount, nativeClient)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get replicas for key '%s': %w", key, err)
 	}
 	return clients, nil
 }
 
-func (rc *RedisClient) GetAllClients() map[string]any {
-	return rc.runtime.All(redisNativeClient)
+func (rc *Client) GetAllClients() map[string]any {
+	return rc.runtime.All(nativeClient)
 }
 
-func redisNativeClient(node gyro.Node) (any, bool) {
-	redisNode, ok := node.(*RedisNode)
+func nativeClient(node gyro.Node) (any, bool) {
+	redisNode, ok := node.(*Node)
 	if !ok {
 		return nil, false
 	}
@@ -237,51 +237,51 @@ func redisNativeClient(node gyro.Node) (any, bool) {
 }
 
 // Close closes all connections and releases resources.
-func (rc *RedisClient) Close() error {
+func (rc *Client) Close() error {
 	return rc.runtime.Close()
 }
 
-func NewRedisCluster(addresses []string) (*RedisClient, error) {
-	return NewRedisClient(addresses, nil)
+func NewCluster(addresses []string) (*Client, error) {
+	return NewClient(addresses, nil)
 }
 
-// RedisNodeFactory creates Redis nodes.
-type RedisNodeFactory struct {
-	config        *RedisClientConfig
-	newConnection func(address string, config gyro.ConnectionConfig) (RedisConnection, error)
+// NodeFactory creates Redis nodes.
+type NodeFactory struct {
+	config        *ClientConfig
+	newConnection func(address string, config gyro.ConnectionConfig) (Connection, error)
 }
 
-// NewRedisNodeFactory creates a new Redis node factory.
-func NewRedisNodeFactory() *RedisNodeFactory {
-	return &RedisNodeFactory{
-		config:        DefaultRedisClientConfig(),
-		newConnection: NewRedisConnection,
+// NewNodeFactory creates a new Redis node factory.
+func NewNodeFactory() *NodeFactory {
+	return &NodeFactory{
+		config:        DefaultClientConfig(),
+		newConnection: NewConnection,
 	}
 }
 
 // WithConnectionConfig returns an independent factory for a new connection
 // configuration. The current factory remains unchanged until a Client has
 // successfully built and published the replacement locator.
-func (f *RedisNodeFactory) WithConnectionConfig(connectionConfig gyro.ConnectionConfig) (gyro.NodeFactory, error) {
+func (f *NodeFactory) WithConnectionConfig(connectionConfig gyro.ConnectionConfig) (gyro.NodeFactory, error) {
 	if f == nil || f.config == nil {
 		return nil, fmt.Errorf("Redis node factory is not initialized")
 	}
 
 	configCopy := *f.config
 	configCopy.Connection = connectionConfig
-	return &RedisNodeFactory{config: &configCopy, newConnection: f.newConnection}, nil
+	return &NodeFactory{config: &configCopy, newConnection: f.newConnection}, nil
 }
 
 // CreateNode creates a new Redis node from NodeInfo.
-func (f *RedisNodeFactory) CreateNode(info gyro.NodeInfo) (gyro.Node, error) {
+func (f *NodeFactory) CreateNode(info gyro.NodeInfo) (gyro.Node, error) {
 	newConnection := f.newConnection
 	if newConnection == nil {
-		newConnection = NewRedisConnection
+		newConnection = NewConnection
 	}
 	conn, err := newConnection(info.Address, f.config.Connection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Redis connection to %s: %w", info.Address, err)
 	}
 
-	return NewRedisNode(info.ID, info.Address, conn), nil
+	return NewNode(info.ID, info.Address, conn), nil
 }

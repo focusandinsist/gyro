@@ -76,8 +76,8 @@ func (c *Client) GetStats() HealthAwarePoolStats {
 	}
 }
 
-// nativeClientProvider is implemented by protocol adapters (e.g. RedisNode,
-// GRPCNode) that can hand back their underlying native client.
+// nativeClientProvider is implemented by protocol adapter nodes that can hand
+// back their underlying native client.
 type nativeClientProvider interface {
 	GetNativeClient() any
 }

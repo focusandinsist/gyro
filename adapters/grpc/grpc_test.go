@@ -47,30 +47,30 @@ func (c *testGRPCConnection) GetState() string { return "READY" }
 func (c *testGRPCConnection) GetNativeClient() any { return c.native }
 
 func TestGRPCConvenienceClientUsesHealthAwareFailover(t *testing.T) {
-	config := DefaultGRPCClientConfig()
+	config := DefaultClientConfig()
 	config.HealthChecker.Interval = 5 * time.Millisecond
 	config.HealthChecker.Timeout = 5 * time.Millisecond
 	config.HealthChecker.FailureThreshold = 1
 	config.HealthChecker.RecoveryThreshold = 1
 
 	connections := make(map[string]*testGRPCConnection)
-	factory := &GRPCNodeFactory{
+	factory := &NodeFactory{
 		config: config,
-		newConnection: func(address string, _ gyro.ConnectionConfig) (GRPCConnection, error) {
+		newConnection: func(address string, _ gyro.ConnectionConfig) (Connection, error) {
 			connection := newTestGRPCConnection(address)
 			connections[address] = connection
 			return connection, nil
 		},
 	}
 
-	client, err := newGRPCClient(
+	client, err := newClient(
 		[]string{"grpc-1.test", "grpc-2.test", "grpc-3.test"},
 		config,
 		factory,
 		nil,
 	)
 	if err != nil {
-		t.Fatalf("NewGRPCClient failed: %v", err)
+		t.Fatalf("NewClient failed: %v", err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
@@ -125,10 +125,10 @@ func TestGRPCConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 }
 
 func TestGRPCConvenienceClientRejectsInvalidHealthConfig(t *testing.T) {
-	config := DefaultGRPCClientConfig()
+	config := DefaultClientConfig()
 	config.HealthChecker.Interval = 0
 
-	client, err := NewGRPCClient([]string{"grpc-1.test"}, config)
+	client, err := NewClient([]string{"grpc-1.test"}, config)
 	if err == nil {
 		client.Close()
 		t.Fatal("expected invalid health checker config to fail")
@@ -138,14 +138,14 @@ func TestGRPCConvenienceClientRejectsInvalidHealthConfig(t *testing.T) {
 func TestNewGRPCConnectionRejectsNegativeTimeouts(t *testing.T) {
 	config := gyro.DefaultConnectionConfig()
 	config.ConnectTimeout = -time.Second
-	if _, err := NewGRPCConnection("localhost:1", config); err == nil {
+	if _, err := NewConnection("localhost:1", config); err == nil {
 		t.Fatal("expected negative connection timeout to be rejected")
 	}
 }
 
 func TestGRPCNodeDoesNotGateNativeClientOnSingleFailedProbe(t *testing.T) {
 	connection := newTestGRPCConnection("grpc.test")
-	node := NewGRPCNode("grpc-1", "grpc.test", connection)
+	node := NewNode("grpc-1", "grpc.test", connection)
 	connection.healthy.Store(false)
 	if node.IsHealthy(context.Background()) {
 		t.Fatal("probe should report the connection unhealthy")

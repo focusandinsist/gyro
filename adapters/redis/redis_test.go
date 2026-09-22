@@ -45,30 +45,30 @@ func (c *testRedisConnection) IsConnected() bool {
 func (c *testRedisConnection) GetNativeClient() any { return c.native }
 
 func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
-	config := DefaultRedisClientConfig()
+	config := DefaultClientConfig()
 	config.HealthChecker.Interval = 5 * time.Millisecond
 	config.HealthChecker.Timeout = 5 * time.Millisecond
 	config.HealthChecker.FailureThreshold = 1
 	config.HealthChecker.RecoveryThreshold = 1
 
 	connections := make(map[string]*testRedisConnection)
-	factory := &RedisNodeFactory{
+	factory := &NodeFactory{
 		config: config,
-		newConnection: func(address string, _ gyro.ConnectionConfig) (RedisConnection, error) {
+		newConnection: func(address string, _ gyro.ConnectionConfig) (Connection, error) {
 			connection := newTestRedisConnection(address)
 			connections[address] = connection
 			return connection, nil
 		},
 	}
 
-	client, err := newRedisClient(
+	client, err := newClient(
 		[]string{"redis-1.test", "redis-2.test", "redis-3.test"},
 		config,
 		factory,
 		nil,
 	)
 	if err != nil {
-		t.Fatalf("NewRedisClient failed: %v", err)
+		t.Fatalf("NewClient failed: %v", err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
@@ -123,10 +123,10 @@ func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 }
 
 func TestRedisConvenienceClientRejectsInvalidHealthConfig(t *testing.T) {
-	config := DefaultRedisClientConfig()
+	config := DefaultClientConfig()
 	config.HealthChecker.Interval = 0
 
-	client, err := NewRedisClient([]string{"redis-1.test"}, config)
+	client, err := NewClient([]string{"redis-1.test"}, config)
 	if err == nil {
 		client.Close()
 		t.Fatal("expected invalid health checker config to fail")
@@ -135,7 +135,7 @@ func TestRedisConvenienceClientRejectsInvalidHealthConfig(t *testing.T) {
 
 func TestRedisNodeDoesNotGateNativeClientOnSingleFailedProbe(t *testing.T) {
 	connection := newTestRedisConnection("redis.test")
-	node := NewRedisNode("redis-1", "redis.test", connection)
+	node := NewNode("redis-1", "redis.test", connection)
 	connection.healthy.Store(false)
 	if node.IsHealthy(context.Background()) {
 		t.Fatal("probe should report the connection unhealthy")
