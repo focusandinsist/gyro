@@ -2,7 +2,6 @@ package gyro
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -14,9 +13,7 @@ type MockNode struct {
 	healthy bool
 	mu      sync.RWMutex
 
-	// Test hooks
 	checkCallCount int
-	lastCheckError error
 }
 
 // NewMockNode creates a new mock node
@@ -57,24 +54,6 @@ func (m *MockNode) Close() error {
 	return nil
 }
 
-// CheckHealth performs a health check and returns an error if unhealthy (for HealthChecker testing)
-func (m *MockNode) CheckHealth(ctx context.Context) error {
-	m.mu.Lock()
-	m.checkCallCount++
-	m.mu.Unlock()
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if !m.healthy {
-		if m.lastCheckError != nil {
-			return m.lastCheckError
-		}
-		return fmt.Errorf("mock node %s is unhealthy", m.id)
-	}
-	return nil
-}
-
 // SetHealthy sets the health status for testing
 func (m *MockNode) SetHealthy(healthy bool) {
 	m.mu.Lock()
@@ -82,25 +61,11 @@ func (m *MockNode) SetHealthy(healthy bool) {
 	m.healthy = healthy
 }
 
-// SetCheckError sets the error to return on health checks
-func (m *MockNode) SetCheckError(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.lastCheckError = err
-}
-
 // GetCheckCallCount returns the number of times IsHealthy was called
 func (m *MockNode) GetCheckCallCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.checkCallCount
-}
-
-// ResetCheckCallCount resets the check call counter
-func (m *MockNode) ResetCheckCallCount() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.checkCallCount = 0
 }
 
 type healthEventRecord struct {
@@ -113,12 +78,14 @@ type healthEventRecord struct {
 type MockHealthListener struct {
 	events []healthEventRecord
 	mu     sync.RWMutex
+	notify chan struct{}
 }
 
 // NewMockHealthListener creates a new mock health listener
 func NewMockHealthListener() *MockHealthListener {
 	return &MockHealthListener{
 		events: make([]healthEventRecord, 0),
+		notify: make(chan struct{}, 1),
 	}
 }
 
@@ -132,6 +99,10 @@ func (m *MockHealthListener) AsHealthListener() HealthListener {
 			Healthy:   healthy,
 			Timestamp: time.Now(),
 		})
+		select {
+		case m.notify <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -153,19 +124,6 @@ func (m *MockHealthListener) GetEventCount() int {
 	return len(m.events)
 }
 
-// GetLastEvent returns the last recorded event
-func (m *MockHealthListener) GetLastEvent() *healthEventRecord {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if len(m.events) == 0 {
-		return nil
-	}
-
-	event := m.events[len(m.events)-1]
-	return &event
-}
-
 // Clear clears all recorded events
 func (m *MockHealthListener) Clear() {
 	m.mu.Lock()
@@ -176,20 +134,13 @@ func (m *MockHealthListener) Clear() {
 // WaitForEvents waits for a specific number of events (for testing async behavior)
 func (m *MockHealthListener) WaitForEvents(expectedCount int, timeout context.Context) bool {
 	for {
+		if m.GetEventCount() >= expectedCount {
+			return true
+		}
 		select {
 		case <-timeout.Done():
 			return false
-		default:
-			if m.GetEventCount() >= expectedCount {
-				return true
-			}
-			// Small sleep to avoid busy waiting
-			select {
-			case <-timeout.Done():
-				return false
-			default:
-				continue
-			}
+		case <-m.notify:
 		}
 	}
 }
@@ -225,63 +176,6 @@ func (m *MockServiceDiscovery) Watch(ctx context.Context, serviceName string) (<
 	return m.watchCh, nil
 }
 
-// UpdateNodes updates the node list and notifies watchers
-func (m *MockServiceDiscovery) UpdateNodes(nodes []NodeInfo) {
-	m.mu.Lock()
-	m.nodes = make([]NodeInfo, len(nodes))
-	copy(m.nodes, nodes)
-	m.mu.Unlock()
-
-	// Notify watchers
-	select {
-	case m.watchCh <- nodes:
-	default:
-		// Channel is full, skip notification
-	}
-}
-
-// AddNode adds a node and notifies watchers
-func (m *MockServiceDiscovery) AddNode(node NodeInfo) {
-	m.mu.Lock()
-	m.nodes = append(m.nodes, node)
-	nodesCopy := make([]NodeInfo, len(m.nodes))
-	copy(nodesCopy, m.nodes)
-	m.mu.Unlock()
-
-	// Notify watchers
-	select {
-	case m.watchCh <- nodesCopy:
-	default:
-		// Channel is full, skip notification
-	}
-}
-
-// RemoveNode removes a node and notifies watchers
-func (m *MockServiceDiscovery) RemoveNode(nodeID string) {
-	m.mu.Lock()
-	for i, node := range m.nodes {
-		if node.ID == nodeID {
-			m.nodes = append(m.nodes[:i], m.nodes[i+1:]...)
-			break
-		}
-	}
-	nodesCopy := make([]NodeInfo, len(m.nodes))
-	copy(nodesCopy, m.nodes)
-	m.mu.Unlock()
-
-	// Notify watchers
-	select {
-	case m.watchCh <- nodesCopy:
-	default:
-		// Channel is full, skip notification
-	}
-}
-
-// Close closes the watch channel
-func (m *MockServiceDiscovery) Close() {
-	close(m.watchCh)
-}
-
 // MockNodeFactory is a test implementation of NodeFactory
 type MockNodeFactory struct {
 	nodes map[string]*MockNode
@@ -310,14 +204,4 @@ func (m *MockNodeFactory) GetMockNode(nodeID string) *MockNode {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.nodes[nodeID]
-}
-
-// SetNodeHealthy sets the health status of a specific node
-func (m *MockNodeFactory) SetNodeHealthy(nodeID string, healthy bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if node, exists := m.nodes[nodeID]; exists {
-		node.SetHealthy(healthy)
-	}
 }
