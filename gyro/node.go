@@ -2,7 +2,15 @@ package gyro
 
 import "context"
 
-// NodeFactory creates nodes from NodeInfo.
+// Node is the minimum backend abstraction required by routing and health.
+type Node interface {
+	ID() string
+	Address() string
+	IsHealthy(ctx context.Context) bool
+	Close() error
+}
+
+// NodeFactory creates nodes from discovery metadata.
 type NodeFactory interface {
 	CreateNode(info NodeInfo) (Node, error)
 }
@@ -13,12 +21,4 @@ type NodeFactory interface {
 type ConnectionConfigurableNodeFactory interface {
 	NodeFactory
 	WithConnectionConfig(config ConnectionConfig) (NodeFactory, error)
-}
-
-// Node is the minimum backend abstraction required by routing and health.
-type Node interface {
-	ID() string
-	Address() string
-	IsHealthy(ctx context.Context) bool
-	Close() error
 }

@@ -13,6 +13,7 @@ import (
 
 var ErrLocatorClosed = errors.New("locator is closed")
 
+// Locator routes keys to nodes and owns node membership and shutdown.
 type Locator interface {
 	Get(ctx context.Context, key string) (Node, error)
 	GetReplicas(ctx context.Context, key string, count int) ([]Node, error)
@@ -22,6 +23,7 @@ type Locator interface {
 	Close() error
 }
 
+// LocatorConfig controls the consistent-hash ring layout.
 type LocatorConfig struct {
 	PartitionCount    int     `json:"partition_count"`
 	ReplicationFactor int     `json:"replication_factor"`
@@ -45,6 +47,7 @@ func DefaultLocatorConfig() LocatorConfig {
 	}
 }
 
+// ConsistentLocator implements Locator with a consistent hash ring.
 type ConsistentLocator struct {
 	mu     sync.RWMutex
 	nodes  map[string]Node

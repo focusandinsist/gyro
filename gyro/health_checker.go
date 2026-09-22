@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+// DefaultHealthChecker periodically probes registered nodes and publishes
+// threshold-based health transitions to listeners.
 type DefaultHealthChecker struct {
 	checkerState
 	checkerLifecycle
@@ -13,6 +15,8 @@ type DefaultHealthChecker struct {
 	maxWorkers int
 }
 
+// checkerState contains node, configuration, and health statistics protected
+// by checkerState.mu.
 type checkerState struct {
 	mu              sync.RWMutex
 	config          HealthCheckerConfig
@@ -21,17 +25,23 @@ type checkerState struct {
 	nodeStats       map[string]*NodeHealthStats
 }
 
+// checkerBroadcaster serializes asynchronous listener notifications so health
+// transitions are observed in publication order.
 type checkerBroadcaster struct {
 	healthListeners  []HealthListener
 	notificationTail chan struct{}
 }
 
+// checkerLifecycle owns the parent context and the currently running worker
+// generation. Its lock is independent from checkerState.mu.
 type checkerLifecycle struct {
 	lifecycleMu sync.Mutex
 	parentCtx   context.Context
 	run         *healthCheckRun
 }
 
+// healthCheckRun contains the cancellation and work queue for one monitoring
+// generation.
 type healthCheckRun struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -39,6 +49,8 @@ type healthCheckRun struct {
 	queue  chan Node
 }
 
+// NewDefaultHealthChecker creates a checker with no registered nodes or active
+// monitoring generation.
 func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
 	return &DefaultHealthChecker{
 		checkerState: checkerState{

@@ -6,18 +6,6 @@ import (
 	"time"
 )
 
-func stringMapEqual(left, right map[string]string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for key, value := range left {
-		if right[key] != value {
-			return false
-		}
-	}
-	return true
-}
-
 // updateServiceDiscoveryHealth updates the service discovery health status.
 func (c *Client) updateServiceDiscoveryHealth(run *clientRun, healthy bool, err error) {
 	// Serialize health publication with topology reconciliation so stateMu is
@@ -356,6 +344,18 @@ func (c *Client) connectionConfigEqual(old, new ConnectionConfig) bool {
 		old.ConnectTimeout == new.ConnectTimeout &&
 		old.ReadTimeout == new.ReadTimeout &&
 		old.WriteTimeout == new.WriteTimeout
+}
+
+func stringMapEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // updateHealthCheckerConfig updates the health checker configuration.

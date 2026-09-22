@@ -27,6 +27,7 @@ type ConfigurableHealthChecker interface {
 	IsEnabled() bool
 }
 
+// HealthCheckerConfig controls probe timing and consecutive-result thresholds.
 type HealthCheckerConfig struct {
 	Enabled           bool          `json:"enabled"`
 	Interval          time.Duration `json:"interval"`
@@ -53,6 +54,7 @@ func ValidateHealthCheckerConfig(config HealthCheckerConfig) error {
 	return nil
 }
 
+// DefaultHealthCheckerConfig returns the default probe and threshold settings.
 func DefaultHealthCheckerConfig() HealthCheckerConfig {
 	return HealthCheckerConfig{
 		Enabled:           true,
@@ -63,6 +65,7 @@ func DefaultHealthCheckerConfig() HealthCheckerConfig {
 	}
 }
 
+// NodeHealthStats is the observable health history for one node.
 type NodeHealthStats struct {
 	ConsecutiveFailures  int
 	ConsecutiveSuccesses int
@@ -72,6 +75,7 @@ type NodeHealthStats struct {
 	TotalFailures        int64
 }
 
+// HealthListener receives a node health transition after its threshold is met.
 type HealthListener func(nodeID string, healthy bool)
 
 // HealthAwarePoolStats contains statistics about a health-aware pool

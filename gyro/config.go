@@ -6,20 +6,20 @@ import (
 	"time"
 )
 
-// ConfigManager manages configuration updates.
-type ConfigManager struct {
-	mu       sync.RWMutex
-	updateMu sync.Mutex
-	config   *Config
-	watchers []ConfigWatcher
-}
-
 // Config is the configuration for Gyro clients, composed of the
 // individual component configs below.
 type Config struct {
 	Locator       LocatorConfig       `json:"locator"`
 	HealthChecker HealthCheckerConfig `json:"health_checker"`
 	Connection    ConnectionConfig    `json:"connection"`
+}
+
+// ConfigManager manages configuration updates.
+type ConfigManager struct {
+	mu       sync.RWMutex
+	updateMu sync.Mutex
+	config   *Config
+	watchers []ConfigWatcher
 }
 
 // ConnectionConfig configures connection-specific behavior.
