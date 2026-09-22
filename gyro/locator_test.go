@@ -41,12 +41,12 @@ func TestConsistentLocator_AddNode(t *testing.T) {
 	node1 := NewMockNode("node1", "127.0.0.1:6379")
 	node2 := NewMockNode("node2", "127.0.0.1:6380")
 
-	err = locator.AddNode(node1)
+	err = locator.AddNodeContext(context.Background(), node1)
 	if err != nil {
 		t.Fatalf("Failed to add node1: %v", err)
 	}
 
-	err = locator.AddNode(node2)
+	err = locator.AddNodeContext(context.Background(), node2)
 	if err != nil {
 		t.Fatalf("Failed to add node2: %v", err)
 	}
@@ -76,11 +76,11 @@ func TestConsistentLocator_RemoveNode(t *testing.T) {
 	node1 := NewMockNode("node1", "127.0.0.1:6379")
 	node2 := NewMockNode("node2", "127.0.0.1:6380")
 
-	locator.AddNode(node1)
-	locator.AddNode(node2)
+	locator.AddNodeContext(context.Background(), node1)
+	locator.AddNodeContext(context.Background(), node2)
 
 	// Remove node1
-	err = locator.RemoveNode("node1")
+	err = locator.RemoveNodeContext(context.Background(), "node1")
 	if err != nil {
 		t.Fatalf("Failed to remove node1: %v", err)
 	}
@@ -115,9 +115,9 @@ func TestConsistentLocator_GetConsistency(t *testing.T) {
 	node2 := NewMockNode("node2", "127.0.0.1:6380")
 	node3 := NewMockNode("node3", "127.0.0.1:6381")
 
-	locator.AddNode(node1)
-	locator.AddNode(node2)
-	locator.AddNode(node3)
+	locator.AddNodeContext(context.Background(), node1)
+	locator.AddNodeContext(context.Background(), node2)
+	locator.AddNodeContext(context.Background(), node3)
 
 	ctx := context.Background()
 	testKey := "test_key_123"
@@ -152,9 +152,9 @@ func TestConsistentLocator_GetDistribution(t *testing.T) {
 	node2 := NewMockNode("node2", "127.0.0.1:6380")
 	node3 := NewMockNode("node3", "127.0.0.1:6381")
 
-	locator.AddNode(node1)
-	locator.AddNode(node2)
-	locator.AddNode(node3)
+	locator.AddNodeContext(context.Background(), node1)
+	locator.AddNodeContext(context.Background(), node2)
+	locator.AddNodeContext(context.Background(), node3)
 
 	ctx := context.Background()
 
@@ -203,9 +203,9 @@ func TestConsistentLocator_GetReplicas(t *testing.T) {
 	node2 := NewMockNode("node2", "127.0.0.1:6380")
 	node3 := NewMockNode("node3", "127.0.0.1:6381")
 
-	locator.AddNode(node1)
-	locator.AddNode(node2)
-	locator.AddNode(node3)
+	locator.AddNodeContext(context.Background(), node1)
+	locator.AddNodeContext(context.Background(), node2)
+	locator.AddNodeContext(context.Background(), node3)
 
 	ctx := context.Background()
 	testKey := "test_key_replicas"
@@ -269,7 +269,7 @@ func TestConsistentLocator_EmptyLocator(t *testing.T) {
 	}
 
 	// Test RemoveNode on empty locator
-	err = locator.RemoveNode("nonexistent")
+	err = locator.RemoveNodeContext(context.Background(), "nonexistent")
 	if err == nil {
 		t.Error("Expected error when removing from empty locator")
 	}
@@ -286,13 +286,13 @@ func TestConsistentLocator_DuplicateNode(t *testing.T) {
 	node1 := NewMockNode("node1", "127.0.0.1:6379")
 
 	// Add node first time
-	err = locator.AddNode(node1)
+	err = locator.AddNodeContext(context.Background(), node1)
 	if err != nil {
 		t.Fatalf("Failed to add node first time: %v", err)
 	}
 
 	// Try to add same node again
-	err = locator.AddNode(node1)
+	err = locator.AddNodeContext(context.Background(), node1)
 	if err == nil {
 		t.Error("Expected error when adding duplicate node")
 	}
@@ -311,16 +311,16 @@ func TestConsistentLocator_RemoveFailureKeepsNodeAndConnection(t *testing.T) {
 	}
 	node1 := NewMockNode("node1", "127.0.0.1:6379")
 	node2 := NewMockNode("node2", "127.0.0.1:6380")
-	if err := locator.AddNode(node1); err != nil {
+	if err := locator.AddNodeContext(context.Background(), node1); err != nil {
 		t.Fatalf("AddNode(node1) failed: %v", err)
 	}
-	if err := locator.AddNode(node2); err != nil {
+	if err := locator.AddNodeContext(context.Background(), node2); err != nil {
 		t.Fatalf("AddNode(node2) failed: %v", err)
 	}
 	removeErr := errors.New("ring removal failed")
 	locator.ring = &removeFailingRing{hashRing: locator.ring, err: removeErr}
 
-	if err := locator.RemoveNode(node1.ID()); !errors.Is(err, removeErr) {
+	if err := locator.RemoveNodeContext(context.Background(), node1.ID()); !errors.Is(err, removeErr) {
 		t.Fatalf("RemoveNode error = %v, want %v", err, removeErr)
 	}
 	if got := len(locator.GetAllNodes()); got != 2 {
@@ -355,7 +355,7 @@ func TestConsistentLocator_NodeChangesPropagateContextCancellation(t *testing.T)
 
 	node := NewMockNode("existing", "existing")
 	locator.ring = baseRing
-	if err := locator.AddNode(node); err != nil {
+	if err := locator.AddNodeContext(context.Background(), node); err != nil {
 		t.Fatal(err)
 	}
 	locator.ring = &contextAwareRing{hashRing: baseRing}
@@ -392,7 +392,7 @@ func TestConsistentLocator_CloseDoesNotHoldLockDuringNodeClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := &blockingCloseNode{id: "node", started: make(chan struct{}), release: make(chan struct{})}
-	if err := locator.AddNode(node); err != nil {
+	if err := locator.AddNodeContext(context.Background(), node); err != nil {
 		t.Fatal(err)
 	}
 	closeDone := make(chan error, 1)
@@ -403,11 +403,11 @@ func TestConsistentLocator_CloseDoesNotHoldLockDuringNodeClose(t *testing.T) {
 		t.Fatal("node close did not start")
 	}
 	operationDone := make(chan error, 1)
-	go func() { operationDone <- locator.AddNode(NewMockNode("new", "new")) }()
+	go func() { operationDone <- locator.AddNodeContext(context.Background(), NewMockNode("new", "new")) }()
 	select {
 	case err := <-operationDone:
-		if err != nil {
-			t.Fatalf("AddNode while Close was closing detached node failed: %v", err)
+		if !errors.Is(err, ErrLocatorClosed) {
+			t.Fatalf("AddNode while Close was closing detached node error = %v, want ErrLocatorClosed", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("locator lock was held while node Close blocked")
@@ -415,5 +415,38 @@ func TestConsistentLocator_CloseDoesNotHoldLockDuringNodeClose(t *testing.T) {
 	close(node.release)
 	if err := <-closeDone; err != nil {
 		t.Fatalf("Close failed: %v", err)
+	}
+}
+
+func TestConsistentLocatorRejectsOperationsAfterClose(t *testing.T) {
+	locator, err := NewConsistentLocator(DefaultLocatorConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := NewMockNode("node", "node")
+	if err := locator.AddNodeContext(context.Background(), node); err != nil {
+		t.Fatal(err)
+	}
+	if err := locator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := locator.Close(); err != nil {
+		t.Fatalf("repeated Close failed: %v", err)
+	}
+
+	if _, err := locator.Get(context.Background(), "key"); !errors.Is(err, ErrLocatorClosed) {
+		t.Fatalf("Get error = %v, want ErrLocatorClosed", err)
+	}
+	if _, err := locator.GetReplicas(context.Background(), "key", 1); !errors.Is(err, ErrLocatorClosed) {
+		t.Fatalf("GetReplicas error = %v, want ErrLocatorClosed", err)
+	}
+	if err := locator.AddNodeContext(context.Background(), NewMockNode("new", "new")); !errors.Is(err, ErrLocatorClosed) {
+		t.Fatalf("AddNode error = %v, want ErrLocatorClosed", err)
+	}
+	if err := locator.RemoveNodeContext(context.Background(), node.ID()); !errors.Is(err, ErrLocatorClosed) {
+		t.Fatalf("RemoveNode error = %v, want ErrLocatorClosed", err)
+	}
+	if got := locator.GetAllNodes(); len(got) != 0 {
+		t.Fatalf("GetAllNodes after Close returned %d nodes, want 0", len(got))
 	}
 }

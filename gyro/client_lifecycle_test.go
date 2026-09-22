@@ -2,36 +2,14 @@ package gyro
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 )
 
-func (m *MockServiceDiscovery) Register(_ context.Context, _ string, node NodeInfo) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.nodes = append(m.nodes, node)
-	return nil
-}
-
-func (m *MockServiceDiscovery) Unregister(_ context.Context, _ string, nodeID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for i, node := range m.nodes {
-		if node.ID == nodeID {
-			m.nodes = append(m.nodes[:i], m.nodes[i+1:]...)
-			return nil
-		}
-	}
-
-	return fmt.Errorf("node %s not found", nodeID)
-}
-
 func newLifecycleTestClient(t *testing.T) (*Client, *ConfigManager, *MockNodeFactory) {
 	t.Helper()
 
-	config := DefaultClientConfig()
+	config := DefaultConfig()
 	config.HealthChecker.Enabled = false
 	configManager := NewConfigManager(config)
 	discovery := NewMockServiceDiscovery([]NodeInfo{
@@ -194,7 +172,7 @@ func TestClientConfigReloadReplacesAndClosesOldLocator(t *testing.T) {
 }
 
 func TestClientConfigReloadKeepsHealthMonitoringActive(t *testing.T) {
-	config := DefaultClientConfig()
+	config := DefaultConfig()
 	config.HealthChecker = HealthCheckerConfig{
 		Enabled:           true,
 		Interval:          5 * time.Millisecond,
@@ -258,16 +236,4 @@ func TestClientRejectsUnsupportedConnectionConfigReload(t *testing.T) {
 	if !oldNode.IsHealthy(context.Background()) {
 		t.Fatal("failed connection config update closed the active node")
 	}
-}
-
-func waitForNodeChecks(t *testing.T, node *MockNode, minimum int) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if node.GetCheckCallCount() >= minimum {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("node %s did not receive %d health checks", node.ID(), minimum)
 }

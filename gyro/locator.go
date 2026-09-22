@@ -11,24 +11,19 @@ import (
 	"github.com/focusandinsist/consistent-go/consistent"
 )
 
-type Node interface {
-	ID() string
-	Address() string
-	IsHealthy(ctx context.Context) bool
-	Close() error
-}
-
+// Locator routes keys to nodes and owns node membership and shutdown.
 type Locator interface {
 	Get(ctx context.Context, key string) (Node, error)
 	GetReplicas(ctx context.Context, key string, count int) ([]Node, error)
-	AddNode(node Node) error
 	AddNodeContext(ctx context.Context, node Node) error
-	RemoveNode(nodeID string) error
 	RemoveNodeContext(ctx context.Context, nodeID string) error
 	GetAllNodes() []Node
 	Close() error
 }
 
+var ErrLocatorClosed = errors.New("locator is closed")
+
+// LocatorConfig controls the consistent-hash ring layout.
 type LocatorConfig struct {
 	PartitionCount    int     `json:"partition_count"`
 	ReplicationFactor int     `json:"replication_factor"`
@@ -52,11 +47,13 @@ func DefaultLocatorConfig() LocatorConfig {
 	}
 }
 
+// ConsistentLocator implements Locator with a consistent hash ring.
 type ConsistentLocator struct {
 	mu     sync.RWMutex
 	nodes  map[string]Node
 	ring   hashRing
 	config LocatorConfig
+	closed bool
 	logger atomic.Pointer[slog.Logger]
 }
 
@@ -122,6 +119,9 @@ func (cl *ConsistentLocator) Get(ctx context.Context, key string) (Node, error) 
 	cl.mu.RLock()
 	defer cl.mu.RUnlock()
 
+	if cl.closed {
+		return nil, ErrLocatorClosed
+	}
 	if len(cl.nodes) == 0 {
 		return nil, fmt.Errorf("no nodes available in ring")
 	}
@@ -147,6 +147,9 @@ func (cl *ConsistentLocator) GetReplicas(ctx context.Context, key string, count 
 	cl.mu.RLock()
 	defer cl.mu.RUnlock()
 
+	if cl.closed {
+		return nil, ErrLocatorClosed
+	}
 	if len(cl.nodes) == 0 {
 		return nil, fmt.Errorf("no nodes available in locator")
 	}
@@ -170,11 +173,6 @@ func (cl *ConsistentLocator) GetReplicas(ctx context.Context, key string, count 
 	return replicas, nil
 }
 
-// AddNode adds a new node to the locator.
-func (cl *ConsistentLocator) AddNode(node Node) error {
-	return cl.AddNodeContext(context.Background(), node)
-}
-
 // AddNodeContext adds a node while honoring the caller's cancellation and
 // deadline during ring rebalancing.
 func (cl *ConsistentLocator) AddNodeContext(ctx context.Context, node Node) error {
@@ -193,6 +191,9 @@ func (cl *ConsistentLocator) AddNodeContext(ctx context.Context, node Node) erro
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 
+	if cl.closed {
+		return ErrLocatorClosed
+	}
 	if _, exists := cl.nodes[nodeID]; exists {
 		return fmt.Errorf("node %s already exists in locator", nodeID)
 	}
@@ -206,11 +207,6 @@ func (cl *ConsistentLocator) AddNodeContext(ctx context.Context, node Node) erro
 	return nil
 }
 
-// RemoveNode removes a node from the locator.
-func (cl *ConsistentLocator) RemoveNode(nodeID string) error {
-	return cl.RemoveNodeContext(context.Background(), nodeID)
-}
-
 // RemoveNodeContext removes a node while honoring the caller's cancellation
 // and deadline during ring rebalancing.
 func (cl *ConsistentLocator) RemoveNodeContext(ctx context.Context, nodeID string) error {
@@ -222,6 +218,10 @@ func (cl *ConsistentLocator) RemoveNodeContext(ctx context.Context, nodeID strin
 	}
 
 	cl.mu.Lock()
+	if cl.closed {
+		cl.mu.Unlock()
+		return ErrLocatorClosed
+	}
 	nodeToClose, exists := cl.nodes[nodeID]
 	if !exists {
 		cl.mu.Unlock()
@@ -257,14 +257,19 @@ func (cl *ConsistentLocator) GetAllNodes() []Node {
 
 // Close closes all connections and releases resources.
 func (cl *ConsistentLocator) Close() error {
-	cl.mu.Lock()
-	nodes := cl.nodes
-	cl.nodes = make(map[string]Node)
 	newRing, err := newHashRing(cl.config)
 	if err != nil {
-		cl.mu.Unlock()
 		return fmt.Errorf("failed to reset closed locator ring: %w", err)
 	}
+
+	cl.mu.Lock()
+	if cl.closed {
+		cl.mu.Unlock()
+		return nil
+	}
+	cl.closed = true
+	nodes := cl.nodes
+	cl.nodes = make(map[string]Node)
 	cl.ring = newRing
 	cl.mu.Unlock()
 

@@ -161,6 +161,45 @@ func TestStaticServiceDiscoveryAddressIDsSurviveReordering(t *testing.T) {
 	}
 }
 
+func TestStaticServiceDiscoveryWatchCancellationOwnsChannelClose(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		discovery := NewStaticServiceDiscovery(nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		updates, err := discovery.Watch(ctx, "orders")
+		if err != nil {
+			t.Fatalf("iteration %d: Watch failed: %v", i, err)
+		}
+		<-updates
+
+		publisherDone := make(chan struct{})
+		go func(iteration int) {
+			defer close(publisherDone)
+			for update := 0; update < 20; update++ {
+				discovery.SetNodes("orders", []NodeInfo{{
+					ID:      "node",
+					Address: fmt.Sprintf("127.0.0.1:%d", iteration*20+update),
+				}})
+			}
+		}(i)
+		cancel()
+		<-publisherDone
+
+		deadline := time.After(time.Second)
+		for {
+			select {
+			case _, open := <-updates:
+				if !open {
+					goto closed
+				}
+			case <-deadline:
+				t.Fatalf("iteration %d: watcher channel was not closed", i)
+			}
+		}
+	closed:
+		discovery.SetNodes("orders", []NodeInfo{{ID: "after-close", Address: "after-close"}})
+	}
+}
+
 func assertNodeSnapshot(t *testing.T, updates <-chan []NodeInfo, want []NodeInfo) {
 	t.Helper()
 	select {

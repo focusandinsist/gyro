@@ -1,4 +1,4 @@
-package redis
+package grpc
 
 import (
 	"context"
@@ -10,65 +10,67 @@ import (
 	"github.com/focusandinsist/gyro/gyro"
 )
 
-type testRedisNativeClient struct {
+type testGRPCNativeClient struct {
 	address string
 }
 
-type testRedisConnection struct {
-	native  *testRedisNativeClient
+type testGRPCConnection struct {
+	native  *testGRPCNativeClient
 	healthy atomic.Bool
 	closed  atomic.Bool
 }
 
-func newTestRedisConnection(address string) *testRedisConnection {
-	connection := &testRedisConnection{native: &testRedisNativeClient{address: address}}
+func newTestGRPCConnection(address string) *testGRPCConnection {
+	connection := &testGRPCConnection{native: &testGRPCNativeClient{address: address}}
 	connection.healthy.Store(true)
 	return connection
 }
 
-func (c *testRedisConnection) Ping(context.Context) error {
+func (c *testGRPCConnection) Ping(context.Context) error {
 	if c.closed.Load() || !c.healthy.Load() {
 		return fmt.Errorf("connection is unhealthy")
 	}
 	return nil
 }
 
-func (c *testRedisConnection) Close() error {
+func (c *testGRPCConnection) Close() error {
 	c.closed.Store(true)
 	return nil
 }
 
-func (c *testRedisConnection) IsConnected() bool {
+func (c *testGRPCConnection) IsConnected() bool {
 	return !c.closed.Load() && c.healthy.Load()
 }
 
-func (c *testRedisConnection) GetNativeClient() any { return c.native }
+func (c *testGRPCConnection) GetState() string { return "READY" }
 
-func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
-	config := DefaultRedisClientConfig()
+func (c *testGRPCConnection) GetNativeClient() any { return c.native }
+
+func TestGRPCConvenienceClientUsesHealthAwareFailover(t *testing.T) {
+	config := DefaultClientConfig()
 	config.HealthChecker.Interval = 5 * time.Millisecond
 	config.HealthChecker.Timeout = 5 * time.Millisecond
 	config.HealthChecker.FailureThreshold = 1
 	config.HealthChecker.RecoveryThreshold = 1
 
-	connections := make(map[string]*testRedisConnection)
-	factory := &RedisNodeFactory{
+	connections := make(map[string]*testGRPCConnection)
+	factory := &NodeFactory{
 		config: config,
-		newConnection: func(address string, _ gyro.ConnectionConfig) (RedisConnection, error) {
-			connection := newTestRedisConnection(address)
+		newConnection: func(address string, _ gyro.ConnectionConfig) (Connection, error) {
+			connection := newTestGRPCConnection(address)
 			connections[address] = connection
 			return connection, nil
 		},
 	}
 
-	client, err := newRedisClient(
-		[]string{"redis-1.test", "redis-2.test", "redis-3.test"},
+	client, err := newClient(
+		[]string{"grpc-1.test", "grpc-2.test", "grpc-3.test"},
 		config,
 		factory,
 		nil,
 	)
 	if err != nil {
-		t.Fatalf("NewRedisClient failed: %v", err)
+		t.Fatalf("NewClient failed: %v", err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
@@ -76,30 +78,36 @@ func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	if !ok {
 		t.Fatalf("convenience client locator is %T, want *gyro.HealthAwarePool", client.locator)
 	}
-
-	key := findRedisKeyForNode(t, client.locator, "redis-1")
-	connections["redis-1.test"].healthy.Store(false)
-	waitForRedisNodeHealth(t, pool, "redis-1", false)
+	key := findGRPCKeyForNode(t, client.locator, "grpc-1")
+	replicas, err := client.GetClientsForReplicas(context.Background(), key, 2)
+	if err != nil || len(replicas) != 2 {
+		t.Fatalf("replica clients = %d, err = %v; want 2 clients", len(replicas), err)
+	}
+	if clients := client.GetAllClients(); len(clients) != 3 {
+		t.Fatalf("all clients = %d, want 3", len(clients))
+	}
+	connections["grpc-1.test"].healthy.Store(false)
+	waitForGRPCNodeHealth(t, pool, "grpc-1", false)
 
 	native, err := client.GetClientForKey(context.Background(), key)
 	if err != nil {
 		t.Fatalf("GetClientForKey failed after primary became unhealthy: %v", err)
 	}
-	fallback, ok := native.(*testRedisNativeClient)
+	fallback, ok := native.(*testGRPCNativeClient)
 	if !ok {
-		t.Fatalf("native client is %T, want *testRedisNativeClient", native)
+		t.Fatalf("native client is %T, want *testGRPCNativeClient", native)
 	}
-	if fallback.address == "redis-1.test" {
+	if fallback.address == "grpc-1.test" {
 		t.Fatal("health-aware routing returned the unhealthy primary")
 	}
 
-	connections["redis-1.test"].healthy.Store(true)
-	waitForRedisNodeHealth(t, pool, "redis-1", true)
+	connections["grpc-1.test"].healthy.Store(true)
+	waitForGRPCNodeHealth(t, pool, "grpc-1", true)
 	native, err = client.GetClientForKey(context.Background(), key)
 	if err != nil {
 		t.Fatalf("GetClientForKey failed after primary recovered: %v", err)
 	}
-	if native.(*testRedisNativeClient).address != "redis-1.test" {
+	if native.(*testGRPCNativeClient).address != "grpc-1.test" {
 		t.Fatal("health-aware routing did not return to the recovered primary")
 	}
 
@@ -116,20 +124,28 @@ func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	}
 }
 
-func TestRedisConvenienceClientRejectsInvalidHealthConfig(t *testing.T) {
-	config := DefaultRedisClientConfig()
+func TestGRPCConvenienceClientRejectsInvalidHealthConfig(t *testing.T) {
+	config := DefaultClientConfig()
 	config.HealthChecker.Interval = 0
 
-	client, err := NewRedisClient([]string{"redis-1.test"}, config)
+	client, err := NewClient([]string{"grpc-1.test"}, config)
 	if err == nil {
 		client.Close()
 		t.Fatal("expected invalid health checker config to fail")
 	}
 }
 
-func TestRedisNodeDoesNotGateNativeClientOnSingleFailedProbe(t *testing.T) {
-	connection := newTestRedisConnection("redis.test")
-	node := NewRedisNode("redis-1", "redis.test", connection)
+func TestNewGRPCConnectionRejectsNegativeTimeouts(t *testing.T) {
+	config := gyro.DefaultConnectionConfig()
+	config.ConnectTimeout = -time.Second
+	if _, err := NewConnection("localhost:1", config); err == nil {
+		t.Fatal("expected negative connection timeout to be rejected")
+	}
+}
+
+func TestGRPCNodeDoesNotGateNativeClientOnSingleFailedProbe(t *testing.T) {
+	connection := newTestGRPCConnection("grpc.test")
+	node := NewNode("grpc-1", "grpc.test", connection)
 	connection.healthy.Store(false)
 	if node.IsHealthy(context.Background()) {
 		t.Fatal("probe should report the connection unhealthy")
@@ -145,10 +161,10 @@ func TestRedisNodeDoesNotGateNativeClientOnSingleFailedProbe(t *testing.T) {
 	}
 }
 
-func findRedisKeyForNode(t *testing.T, locator gyro.Locator, nodeID string) string {
+func findGRPCKeyForNode(t *testing.T, locator gyro.Locator, nodeID string) string {
 	t.Helper()
 	for i := 0; i < 10000; i++ {
-		key := fmt.Sprintf("redis-key-%d", i)
+		key := fmt.Sprintf("grpc-key-%d", i)
 		node, err := locator.Get(context.Background(), key)
 		if err != nil {
 			t.Fatalf("locate key %q: %v", key, err)
@@ -161,14 +177,16 @@ func findRedisKeyForNode(t *testing.T, locator gyro.Locator, nodeID string) stri
 	return ""
 }
 
-func waitForRedisNodeHealth(t *testing.T, pool *gyro.HealthAwarePool, nodeID string, healthy bool) {
+func waitForGRPCNodeHealth(t *testing.T, pool *gyro.HealthAwarePool, nodeID string, healthy bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
 	for time.Now().Before(deadline) {
 		if pool.IsNodeHealthy(nodeID) == healthy {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		<-ticker.C
 	}
 	t.Fatalf("node %s health did not become %v", nodeID, healthy)
 }
