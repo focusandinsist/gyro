@@ -1,3 +1,5 @@
+// Package grpc provides the gRPC protocol adapter and convenience client for
+// Gyro's health-aware consistent-hash routing.
 package grpc
 
 import (

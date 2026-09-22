@@ -1,7 +1,7 @@
 # Core Package Map
 
 The `gyro` package is the public core of the project. Protocol-specific
-convenience clients live in the sibling `redis` and `grpc` packages.
+convenience clients live in the `adapters/redis` and `adapters/grpc` packages.
 
 ## Public Entry Points
 

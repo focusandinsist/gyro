@@ -24,7 +24,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	redisadapter "github.com/focusandinsist/gyro/gyro/redis"
+	redisadapter "github.com/focusandinsist/gyro/adapters/redis"
 )
 
 func main() {
@@ -83,7 +83,7 @@ if err := client.Start(ctx); err != nil {
 native, err := client.GetClientForKey(ctx, "user:123")
 ```
 
-gRPC 用法结构上完全对称,把 `redisadapter` 换成 `github.com/focusandinsist/gyro/gyro/grpc`,拿到的原生客户端是 `*grpc.ClientConn`,自己用生成的 stub(如 `pb.NewUserServiceClient(conn)`)调用即可。gRPC 健康检查走的是标准 `grpc.health.v1.Health` 协议;如果后端服务没有注册这个健康检查服务,Gyro 会回退到用连接的连通性状态判断,不会因此把所有节点都判为不健康。
+gRPC 用法结构上完全对称,把 `redisadapter` 换成 `github.com/focusandinsist/gyro/adapters/grpc`,拿到的原生客户端是 `*grpc.ClientConn`,自己用生成的 stub(如 `pb.NewUserServiceClient(conn)`)调用即可。gRPC 健康检查走的是标准 `grpc.health.v1.Health` 协议;如果后端服务没有注册这个健康检查服务,Gyro 会回退到用连接的连通性状态判断,不会因此把所有节点都判为不健康。
 
 ## 已知限制
 
@@ -92,10 +92,12 @@ gRPC 用法结构上完全对称,把 `redisadapter` 换成 `github.com/focusandi
 ## 项目结构
 
 ```
-gyro/
-├── gyro/                  # 核心:Locator(一致性哈希路由)、HealthChecker、ConfigManager、ServiceDiscovery
-│   ├── redis/             # Redis 适配器(go-redis)
-│   └── grpc/              # gRPC 适配器(grpc-go)
+repository/
+├── gyro/                  # 核心 API 和实现: Locator、Client、HealthChecker、ConfigManager
+├── adapters/              # 外部技术适配器
+│   ├── redis/             # Redis 用户入口和适配器(go-redis)
+│   └── grpc/              # gRPC 用户入口和适配器(grpc-go)
+├── internal/routed/       # 适配器共享的内部生命周期实现
 └── docs/                  # 详细文档
 ```
 

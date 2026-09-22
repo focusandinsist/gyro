@@ -1,3 +1,5 @@
+// Package redis provides the Redis protocol adapter and convenience client
+// for Gyro's health-aware consistent-hash routing.
 package redis
 
 import (
