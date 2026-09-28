@@ -10,30 +10,35 @@ Concrete selectors, failure policies, and resource pools live under
 - `gyro.go`: package overview for the public contracts.
 - `node.go`: runtime node and node-factory interfaces.
 - `config.go`: `Config`, defaults, and `ConfigManager`.
-- `discovery.go`: service discovery contracts and static discovery.
-- `client.go`: `Client` state and dependency model.
+- `discovery.go`: legacy discovery contracts; use `discovery/static` for the
+  reference implementation.
+- `client.go`: transitional client implementation; use the public `client`
+  facade for dynamic discovery/configuration.
 
 ## Client and Runtime Implementation
 
 - `client_lifecycle.go`: start, stop, restart, and close.
 - `client_topology.go`: discovery watches, topology reconciliation, and config replacement.
 - `client_health.go`: client health and routing summaries.
-- `../internal/client`: dynamic client orchestration (migration target).
+- `../client`: public facade backed by `../internal/client`.
 - `../internal/routed`: adapter shared lifecycle composition.
 
 ## Public Contracts
 
 - `health_types.go`: health contracts, configuration, and statistics.
-- `health_checker.go` and `health_pool.go` are transitional runtime files and
-  will move to `internal/health` as the client lifecycle is migrated.
-- `locator.go` is a transitional node-backed locator; new code should depend
-  on `Selector`, `HealthView`, `FailurePolicy`, and `Resource` instead.
+- `health_checker.go`, `health_pool.go`, and `locator.go` are legacy runtime
+  files retained only while downstream code is migrated. New code should use
+  the `health`, `internal/health`, `internal/selector`, and `internal/routed`
+  seams instead.
 
 ## Internal Implementations
 
 - `../internal/selector`: consistent-hash and rendezvous selectors.
 - `../internal/policy`: primary-only and healthy-candidate policies.
 - `../internal/resource`: resource pool ownership and leases.
+- `../internal/health`: probing, threshold state, worker lifecycle, and health snapshots.
+- `../internal/client`: dynamic discovery/configuration client implementation.
+- `../client`: public facade for the dynamic client.
 
 ## Tests
 

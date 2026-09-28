@@ -61,15 +61,21 @@ func main() {
 上面的 `NewCluster` 是固定地址的便捷入口。如果节点列表会变化(比如接 Kubernetes Endpoints、注册中心),用更底层的依赖注入式 API:
 
 ```go
-discovery := gyro.NewStaticServiceDiscovery([]string{
+import (
+    dynamicclient "github.com/focusandinsist/gyro/client"
+    staticdiscovery "github.com/focusandinsist/gyro/discovery/static"
+    gyrohealth "github.com/focusandinsist/gyro/health"
+)
+
+discovery := staticdiscovery.New([]string{
 	"127.0.0.1:6379", "127.0.0.1:6380", "127.0.0.1:6381",
 }) // 换成自己的 ServiceDiscovery 实现即可接入真实注册中心
 
-configManager := gyro.NewConfigManager(gyro.DefaultConfig())
+configManager := dynamicclient.NewConfigManager(dynamicclient.DefaultConfig())
 nodeFactory := redisadapter.NewNodeFactory()
-healthChecker := gyro.NewDefaultHealthChecker(gyro.DefaultHealthCheckerConfig())
+healthChecker := gyrohealth.NewChecker(gyrohealth.DefaultConfig())
 
-client, err := gyro.NewClient("user-cache", discovery, configManager, nodeFactory, healthChecker)
+client, err := dynamicclient.NewClient("user-cache", discovery, configManager, nodeFactory, healthChecker)
 if err != nil {
 	panic(err)
 }
@@ -98,12 +104,13 @@ repository/
 │   ├── redis/             # Redis 用户入口和适配器(go-redis)
 │   └── grpc/              # gRPC 用户入口和适配器(grpc-go)
 ├── internal/              # 按 topology/selector/health/policy/resource/client 拆分的实现
+├── client/                # 动态 discovery/configuration 的公共 facade
 └── docs/                  # 详细文档
 ```
 
-核心包的入口导航在 `gyro/gyro.go`；公开节点接口在 `gyro/node.go`，根配置在
-`gyro/config.go`。动态 Client 的生命周期、拓扑和健康实现分别位于对应的
-`client_*` 文件中。
+核心包的入口导航在 `gyro/gyro.go`；公开节点接口在 `gyro/node.go`。动态 Client
+通过 `client` facade 使用，静态 discovery 和默认健康 checker 分别通过
+`discovery/static` 与 `health` facade 使用；具体生命周期实现位于 `internal/`。
 
 一致性哈希算法本身已经抽成独立的库:[focusandinsist/consistent-go](https://github.com/focusandinsist/consistent-go)。
 

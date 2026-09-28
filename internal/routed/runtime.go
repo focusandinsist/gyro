@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/health"
 	"github.com/focusandinsist/gyro/internal/policy"
 )
 
@@ -14,7 +15,7 @@ import (
 // ownership of their connection and native-client types.
 type Runtime struct {
 	locator gyro.Locator
-	pool    *gyro.HealthAwarePool
+	pool    *health.HealthAwarePool
 	cancel  context.CancelFunc
 
 	closeOnce sync.Once
@@ -51,9 +52,9 @@ func NewWithPolicy(addresses []string, locatorConfig gyro.LocatorConfig, healthC
 		}
 	}
 	if checker == nil {
-		checker = gyro.NewDefaultHealthChecker(healthConfig)
+		checker = health.NewDefaultHealthChecker(healthConfig)
 	}
-	pool := gyro.NewHealthAwarePoolWithCheckerAndPolicy(base, checker, policy)
+	pool := health.NewHealthAwarePoolWithCheckerAndPolicy(base, checker, policy)
 	healthCtx, cancel := context.WithCancel(context.Background())
 	pool.StartHealthMonitoring(healthCtx)
 	return &Runtime{locator: pool, pool: pool, cancel: cancel}, nil
@@ -61,9 +62,6 @@ func NewWithPolicy(addresses []string, locatorConfig gyro.LocatorConfig, healthC
 
 // Locator returns the health-aware routed locator.
 func (r *Runtime) Locator() gyro.Locator { return r.locator }
-
-// Pool returns the health-aware pool for adapter-specific operations.
-func (r *Runtime) Pool() *gyro.HealthAwarePool { return r.pool }
 
 // Replicas selects candidates and converts supported nodes to native clients.
 func (r *Runtime) Replicas(ctx context.Context, key string, count int, native func(gyro.Node) (any, bool)) ([]any, error) {

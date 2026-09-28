@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/health"
 )
 
 type testRedisNativeClient struct {
@@ -72,9 +73,9 @@ func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
-	pool, ok := client.locator.(*gyro.HealthAwarePool)
+	pool, ok := client.locator.(*health.HealthAwarePool)
 	if !ok {
-		t.Fatalf("convenience client locator is %T, want *gyro.HealthAwarePool", client.locator)
+		t.Fatalf("convenience client locator is %T, want *health.HealthAwarePool", client.locator)
 	}
 	key := findRedisKeyForNode(t, client.locator, "redis-1")
 	replicas, err := client.GetClientsForReplicas(context.Background(), key, 2)
@@ -167,7 +168,7 @@ func findRedisKeyForNode(t *testing.T, locator gyro.Locator, nodeID string) stri
 	return ""
 }
 
-func waitForRedisNodeHealth(t *testing.T, pool *gyro.HealthAwarePool, nodeID string, healthy bool) {
+func waitForRedisNodeHealth(t *testing.T, pool *health.HealthAwarePool, nodeID string, healthy bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	ticker := time.NewTicker(time.Millisecond)
