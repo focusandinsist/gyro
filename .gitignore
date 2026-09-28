@@ -49,9 +49,7 @@ gyro.exe
 !test/
 !test/topology_store_test.go
 !test/*.go
-!docs/
 docs/*
-!docs/gyro-rendezvous-selector-20260928.md
 !examples/
 !examples/**/
 !examples/**/main.go
