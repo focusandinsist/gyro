@@ -1,7 +1,10 @@
 package gyro
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"time"
 )
@@ -19,6 +22,9 @@ func (c *Client) updateServiceDiscoveryHealth(run *clientRun, healthy bool, err 
 	}
 
 	c.state.serviceDiscoveryHealthy = healthy
+	if !healthy {
+		c.state.topologyStale = true
+	}
 	if err != nil {
 		c.state.lastServiceDiscoveryError = err.Error()
 		if !healthy {
@@ -30,6 +36,146 @@ func (c *Client) updateServiceDiscoveryHealth(run *clientRun, healthy bool, err 
 			c.state.serviceDiscoveryRetries = 0
 		}
 	}
+}
+
+func (c *Client) acceptTopologySnapshot(ctx context.Context, snapshot TopologySnapshot, allowSourceReset bool) (TopologySnapshot, error) {
+	c.topologyMu.Lock()
+	defer c.topologyMu.Unlock()
+
+	c.stateMu.RLock()
+	store := c.state.topologyStore
+	_, retired := c.state.retiredSources[snapshot.Revision.Source]
+	c.stateMu.RUnlock()
+	if store == nil {
+		return TopologySnapshot{}, ErrInvalidSnapshot
+	}
+	if retired {
+		return TopologySnapshot{}, ErrIncomparableRevision
+	}
+
+	current, hasCurrent := store.Snapshot()
+	if !hasCurrent || current.Revision.Source == snapshot.Revision.Source {
+		if err := store.Publish(ctx, snapshot); err != nil {
+			return TopologySnapshot{}, err
+		}
+	} else {
+		if !allowSourceReset {
+			return TopologySnapshot{}, ErrIncomparableRevision
+		}
+		if err := store.ResetSource(ctx, snapshot); err != nil {
+			return TopologySnapshot{}, err
+		}
+		c.stateMu.Lock()
+		if c.state.retiredSources == nil {
+			c.state.retiredSources = make(map[string]struct{})
+		}
+		c.state.retiredSources[current.Revision.Source] = struct{}{}
+		c.stateMu.Unlock()
+	}
+
+	c.stateMu.Lock()
+	c.state.topologyStale = false
+	c.stateMu.Unlock()
+	accepted, ok := store.Snapshot()
+	if !ok {
+		return TopologySnapshot{}, ErrInvalidSnapshot
+	}
+	return accepted, nil
+}
+
+func (c *Client) reconcileAcceptedTopology(run *clientRun, snapshot TopologySnapshot, previous TopologySnapshot, hasPrevious bool) {
+	if hasPrevious {
+		diff := DiffTopologySnapshots(previous, snapshot)
+		if len(diff.Added) == 0 && len(diff.Removed) == 0 && len(diff.Updated) == 0 {
+			return
+		}
+		if previous.Revision.Source != snapshot.Revision.Source {
+			// Source epochs are different identity domains. Reconcile through a
+			// full remove/add cycle even when member IDs happen to match.
+			c.reconcileServiceNodesFromReset(run, snapshot)
+			return
+		}
+	}
+	nodeInfos, err := nodeInfosFromTopologySnapshot(snapshot)
+	if err != nil {
+		c.log().Error("failed to convert topology snapshot", "error", err)
+		return
+	}
+	c.reconcileServiceNodes(run, nodeInfos)
+}
+
+func (c *Client) reconcileServiceNodesFromReset(run *clientRun, snapshot TopologySnapshot) {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	c.stateMu.RLock()
+	if c.state.run != run || run.ctx == nil || run.ctx.Err() != nil {
+		c.stateMu.RUnlock()
+		return
+	}
+	ids := make([]string, 0, len(c.state.nodeInfos))
+	for id := range c.state.nodeInfos {
+		ids = append(ids, id)
+	}
+	locator := run.pool
+	healthChecker := c.deps.healthChecker
+	nodeFactory := c.state.nodeFactory
+	c.stateMu.RUnlock()
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := locator.RemoveNodeContext(run.ctx, id); err == nil && healthChecker != nil {
+			healthChecker.RemoveNode(id)
+		}
+	}
+	nodeInfos, err := nodeInfosFromTopologySnapshot(snapshot)
+	if err != nil {
+		return
+	}
+	current := make(map[string]NodeInfo, len(nodeInfos))
+	for _, info := range nodeInfos {
+		node, createErr := nodeFactory.CreateNode(info)
+		if createErr != nil {
+			continue
+		}
+		if addErr := locator.AddNodeContext(run.ctx, node); addErr != nil {
+			_ = node.Close()
+			continue
+		}
+		current[info.ID] = cloneNodeInfo(info)
+		if healthChecker != nil {
+			healthChecker.AddNode(node)
+		}
+	}
+	c.stateMu.Lock()
+	if c.state.run == run && run.ctx.Err() == nil {
+		c.state.nodeInfos = current
+	}
+	c.stateMu.Unlock()
+}
+
+func (c *Client) currentTopologySnapshot() (TopologySnapshot, bool) {
+	c.stateMu.RLock()
+	store := c.state.topologyStore
+	c.stateMu.RUnlock()
+	if store == nil {
+		return TopologySnapshot{}, false
+	}
+	return store.Snapshot()
+}
+
+func nodeInfosFromTopologySnapshot(snapshot TopologySnapshot) ([]NodeInfo, error) {
+	nodeInfos := make([]NodeInfo, len(snapshot.Members))
+	for i, member := range snapshot.Members {
+		if len(member.Endpoints) == 0 || member.Endpoints[0].Address == "" {
+			return nil, ErrInvalidSnapshot
+		}
+		nodeInfos[i] = NodeInfo{
+			ID:       member.ID,
+			Address:  member.Endpoints[0].Address,
+			Metadata: cloneStringMap(member.Attributes),
+		}
+	}
+	sortNodeInfosByID(nodeInfos)
+	return nodeInfos, nil
 }
 
 // watchServiceNodes watches for service node changes with retry mechanism.
@@ -50,7 +196,7 @@ func (c *Client) watchServiceNodes(run *clientRun) {
 		default:
 		}
 
-		nodesCh, err := c.deps.discovery.Watch(ctx, c.deps.serviceName)
+		stream, err := c.deps.discovery.Watch(ctx, c.deps.serviceName)
 		if err != nil {
 			c.updateServiceDiscoveryHealth(run, false, err)
 			c.log().Warn("service discovery watch failed", "attempt", retryCount+1, "max_retries", maxRetries, "error", err)
@@ -83,29 +229,45 @@ func (c *Client) watchServiceNodes(run *clientRun) {
 		c.updateServiceDiscoveryHealth(run, true, nil)
 		c.log().Info("service discovery watch established")
 
-		watchFailed := c.processServiceWatch(run, nodesCh)
+		watchFailed := c.processServiceWatch(run, stream)
 		if !watchFailed {
 			return
 		}
 
-		c.updateServiceDiscoveryHealth(run, false, fmt.Errorf("service discovery watch channel closed unexpectedly"))
+		c.updateServiceDiscoveryHealth(run, false, fmt.Errorf("service discovery watch stream ended"))
 		c.log().Warn("service discovery watch failed, retrying")
 	}
 }
 
 // processServiceWatch processes events from the service discovery watch channel.
 // It returns true if the watch failed and should be retried, false for normal shutdown.
-func (c *Client) processServiceWatch(run *clientRun, nodesCh <-chan []NodeInfo) bool {
+func (c *Client) processServiceWatch(run *clientRun, stream TopologyStream) bool {
+	defer stream.Close()
+	firstSnapshot := true
 	for {
-		select {
-		case <-run.ctx.Done():
-			return false // normal shutdown
-		case nodes, ok := <-nodesCh:
-			if !ok {
-				return true // channel closed, caller should retry
+		snapshot, err := stream.Next(run.ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || run.ctx.Err() != nil {
+				return false
 			}
-			c.reconcileServiceNodes(run, nodes)
+			if errors.Is(err, io.EOF) {
+				return true
+			}
+			c.log().Warn("service discovery stream failed", "error", err)
+			return true
 		}
+		previous, hasPrevious := c.currentTopologySnapshot()
+		accepted, err := c.acceptTopologySnapshot(run.ctx, snapshot, firstSnapshot)
+		if err != nil {
+			if errors.Is(err, ErrStaleRevision) || errors.Is(err, ErrRevisionConflict) {
+				c.log().Debug("service discovery snapshot ignored", "error", err)
+				continue
+			}
+			c.log().Warn("service discovery snapshot rejected", "error", err)
+			return true
+		}
+		firstSnapshot = false
+		c.reconcileAcceptedTopology(run, accepted, previous, hasPrevious)
 	}
 }
 

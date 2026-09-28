@@ -44,3 +44,7 @@ main.go
 gyro.exe
 
 .gocache/
+
+# The implement skill requires new tests to live under test/.
+!test/
+!test/topology_store_test.go

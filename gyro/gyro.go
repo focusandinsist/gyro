@@ -37,10 +37,13 @@ func NewClient(serviceName string, discovery ServiceDiscovery, configManager *Co
 			healthChecker: healthChecker,
 		},
 		state: clientState{
-			nodeInfos:   make(map[string]NodeInfo),
-			nodeFactory: nodeFactory,
+			nodeInfos:      make(map[string]NodeInfo),
+			nodeFactory:    nodeFactory,
+			topologyStore:  NewTopologyStore(),
+			retiredSources: make(map[string]struct{}),
 			// False until watchServiceNodes establishes its first watch.
 			serviceDiscoveryHealthy: false,
+			topologyStale:           true,
 		},
 	}
 	client.logger.Store(discardLogger)

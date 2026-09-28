@@ -2,6 +2,7 @@ package gyro
 
 import (
 	"context"
+	"io"
 	"sync"
 	"time"
 )
@@ -147,33 +148,69 @@ func (m *MockHealthListener) WaitForEvents(expectedCount int, timeout context.Co
 
 // MockServiceDiscovery is a test implementation of ServiceDiscovery
 type MockServiceDiscovery struct {
-	nodes   []NodeInfo
-	watchCh chan []NodeInfo
-	mu      sync.RWMutex
+	nodes []NodeInfo
+	watch *mockTopologyStream
+	mu    sync.RWMutex
 }
 
 // NewMockServiceDiscovery creates a new mock service discovery
 func NewMockServiceDiscovery(initialNodes []NodeInfo) *MockServiceDiscovery {
 	return &MockServiceDiscovery{
-		nodes:   initialNodes,
-		watchCh: make(chan []NodeInfo, 10),
+		nodes: cloneNodeInfos(initialNodes),
 	}
 }
 
-// Discover returns the current list of nodes
-func (m *MockServiceDiscovery) Discover(ctx context.Context, serviceName string) ([]NodeInfo, error) {
+// Discover returns the current complete topology snapshot.
+func (m *MockServiceDiscovery) Discover(ctx context.Context, serviceName string) (TopologySnapshot, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
-	// Return a copy to avoid race conditions
-	nodes := make([]NodeInfo, len(m.nodes))
-	copy(nodes, m.nodes)
-	return nodes, nil
+	return normalizeTopologySnapshot(topologySnapshotFromNodeInfos("mock-source", 1, m.nodes))
 }
 
-// Watch returns a channel for node changes
-func (m *MockServiceDiscovery) Watch(ctx context.Context, serviceName string) (<-chan []NodeInfo, error) {
-	return m.watchCh, nil
+// Watch returns a complete snapshot stream.
+func (m *MockServiceDiscovery) Watch(ctx context.Context, serviceName string) (TopologyStream, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	stream := &mockTopologyStream{updates: make(chan TopologySnapshot, 10)}
+	snapshot, err := normalizeTopologySnapshot(topologySnapshotFromNodeInfos("mock-source", 1, m.nodes))
+	if err != nil {
+		return nil, err
+	}
+	stream.updates <- snapshot
+	m.watch = stream
+	go func() {
+		<-ctx.Done()
+		_ = stream.Close()
+	}()
+	return stream, nil
+}
+
+type mockTopologyStream struct {
+	mu      sync.Mutex
+	updates chan TopologySnapshot
+	closed  bool
+}
+
+func (s *mockTopologyStream) Next(ctx context.Context) (TopologySnapshot, error) {
+	select {
+	case <-ctx.Done():
+		return TopologySnapshot{}, ctx.Err()
+	case snapshot, ok := <-s.updates:
+		if !ok {
+			return TopologySnapshot{}, io.EOF
+		}
+		return cloneTopologySnapshot(snapshot), nil
+	}
+}
+
+func (s *mockTopologyStream) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.closed = true
+		close(s.updates)
+	}
+	return nil
 }
 
 // MockNodeFactory is a test implementation of NodeFactory

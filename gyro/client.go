@@ -14,6 +14,7 @@ import (
 type Client struct {
 	stateMu     sync.RWMutex
 	lifecycleMu sync.Mutex
+	topologyMu  sync.Mutex
 	deps        clientDeps
 	state       clientState
 	logger      atomic.Pointer[slog.Logger]
@@ -42,16 +43,41 @@ type clientRun struct {
 // The run and prepared fields represent the active and not-yet-started pool;
 // nodeInfos and health fields are the latest published snapshots.
 type clientState struct {
-	run           *clientRun
-	prepared      *HealthAwarePool
-	nodeFactory   NodeFactory
-	nodeInfos     map[string]NodeInfo
-	configWatcher bool
+	run            *clientRun
+	prepared       *HealthAwarePool
+	nodeFactory    NodeFactory
+	nodeInfos      map[string]NodeInfo
+	topologyStore  TopologyStore
+	retiredSources map[string]struct{}
+	configWatcher  bool
 
 	// Health tracking belongs to the client state snapshot, not to dependency wiring.
 	serviceDiscoveryHealthy   bool
 	lastServiceDiscoveryError string
 	serviceDiscoveryRetries   int
+	topologyStale             bool
+}
+
+// ClientTopologyStatus exposes the last accepted complete topology and whether
+// its source watch is currently stale. The snapshot remains valid while stale.
+type ClientTopologyStatus struct {
+	Snapshot    TopologySnapshot
+	HasSnapshot bool
+	Stale       bool
+}
+
+// GetTopologyStatus returns the current topology view without exposing Client
+// locks or discovery stream ownership.
+func (c *Client) GetTopologyStatus() ClientTopologyStatus {
+	c.stateMu.RLock()
+	store := c.state.topologyStore
+	stale := c.state.topologyStale
+	c.stateMu.RUnlock()
+	if store == nil {
+		return ClientTopologyStatus{Stale: stale}
+	}
+	snapshot, ok := store.Snapshot()
+	return ClientTopologyStatus{Snapshot: snapshot, HasSnapshot: ok, Stale: stale}
 }
 
 // discardLogger is the default logger for internal components: it never
@@ -91,11 +117,18 @@ func (c *Client) log() *slog.Logger {
 func (c *Client) buildLocatorUnsafe(config *Config, nodeFactory NodeFactory) (Locator, []NodeInfo, error) {
 	ctx := context.Background()
 
-	nodeInfos, err := c.deps.discovery.Discover(ctx, c.deps.serviceName)
+	snapshot, err := c.deps.discovery.Discover(ctx, c.deps.serviceName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to discover initial nodes: %w", err)
 	}
-	nodeInfos = cloneNodeInfos(nodeInfos)
+	accepted, err := c.acceptTopologySnapshot(ctx, snapshot, true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to accept initial topology snapshot: %w", err)
+	}
+	nodeInfos, err := nodeInfosFromTopologySnapshot(accepted)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to convert initial topology snapshot: %w", err)
+	}
 	sortNodeInfosByID(nodeInfos)
 
 	baseLocator, err := NewConsistentLocator(config.Locator)

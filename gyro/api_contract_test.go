@@ -2,6 +2,7 @@ package gyro_test
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"github.com/focusandinsist/gyro/gyro"
@@ -9,15 +10,24 @@ import (
 
 type readOnlyDiscovery struct{}
 
-func (readOnlyDiscovery) Discover(context.Context, string) ([]gyro.NodeInfo, error) {
-	return []gyro.NodeInfo{{ID: "node-1", Address: "node-1"}}, nil
+func (readOnlyDiscovery) Discover(context.Context, string) (gyro.TopologySnapshot, error) {
+	return gyro.TopologySnapshot{
+		Revision: gyro.Revision{Source: "api-contract", Generation: 1, Token: "1"},
+		Members:  []gyro.Member{{ID: "node-1", Endpoints: []gyro.Endpoint{{Address: "node-1"}}}},
+	}, nil
 }
 
-func (readOnlyDiscovery) Watch(context.Context, string) (<-chan []gyro.NodeInfo, error) {
-	updates := make(chan []gyro.NodeInfo)
-	close(updates)
-	return updates, nil
+func (readOnlyDiscovery) Watch(context.Context, string) (gyro.TopologyStream, error) {
+	return &closedTopologyStream{}, nil
 }
+
+type closedTopologyStream struct{}
+
+func (closedTopologyStream) Next(context.Context) (gyro.TopologySnapshot, error) {
+	return gyro.TopologySnapshot{}, io.EOF
+}
+
+func (closedTopologyStream) Close() error { return nil }
 
 type minimalHealthChecker struct{}
 
@@ -43,6 +53,7 @@ func (contractNodeFactory) CreateNode(gyro.NodeInfo) (gyro.Node, error) {
 }
 
 var _ gyro.ServiceDiscovery = readOnlyDiscovery{}
+var _ gyro.TopologySource = topologySourceContract{}
 var _ gyro.HealthChecker = minimalHealthChecker{}
 var _ gyro.NodeFactory = contractNodeFactory{}
 
@@ -70,4 +81,14 @@ func TestClientAcceptsReadOnlyDiscoveryAndMinimalHealthChecker(t *testing.T) {
 func TestStaticDiscoverySeparatesRegistrationCapability(t *testing.T) {
 	var _ gyro.ServiceRegistrar = (*gyro.StaticServiceDiscovery)(nil)
 	var _ gyro.ServiceDiscovery = (*gyro.StaticServiceDiscovery)(nil)
+}
+
+type topologySourceContract struct{}
+
+func (topologySourceContract) Snapshot(context.Context) (gyro.TopologySnapshot, error) {
+	return gyro.TopologySnapshot{}, nil
+}
+
+func (topologySourceContract) Watch(context.Context) (gyro.TopologyStream, error) {
+	return closedTopologyStream{}, nil
 }

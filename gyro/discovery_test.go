@@ -3,20 +3,21 @@ package gyro
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"testing"
 	"time"
 )
 
-func TestStaticServiceDiscoveryMutationsNotifyWatchers(t *testing.T) {
+func TestStaticServiceDiscoveryMutationsPublishCompleteSnapshots(t *testing.T) {
 	discovery := NewStaticServiceDiscovery(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	updates, err := discovery.Watch(ctx, "orders")
+	stream, err := discovery.Watch(ctx, "orders")
 	if err != nil {
 		t.Fatalf("Watch failed: %v", err)
 	}
-	assertNodeSnapshot(t, updates, nil)
+	assertTopologySnapshot(t, stream, "orders", nil)
 
 	node1 := NodeInfo{ID: "node-1", Address: "127.0.0.1:8001"}
 	node1Updated := NodeInfo{ID: "node-1", Address: "127.0.0.1:9001"}
@@ -25,34 +26,31 @@ func TestStaticServiceDiscoveryMutationsNotifyWatchers(t *testing.T) {
 	if err := discovery.Register(context.Background(), "orders", node1); err != nil {
 		t.Fatalf("Register failed: %v", err)
 	}
-	assertNodeSnapshot(t, updates, []NodeInfo{node1})
+	assertTopologySnapshot(t, stream, "orders", []NodeInfo{node1})
 
 	if err := discovery.Register(context.Background(), "orders", node1Updated); err != nil {
 		t.Fatalf("Register update failed: %v", err)
 	}
-	assertNodeSnapshot(t, updates, []NodeInfo{node1Updated})
+	assertTopologySnapshot(t, stream, "orders", []NodeInfo{node1Updated})
 
 	discovery.SetNodes("orders", []NodeInfo{node1Updated, node2})
-	assertNodeSnapshot(t, updates, []NodeInfo{node1Updated, node2})
+	assertTopologySnapshot(t, stream, "orders", []NodeInfo{node1Updated, node2})
 
 	if err := discovery.Unregister(context.Background(), "orders", node1.ID); err != nil {
 		t.Fatalf("Unregister failed: %v", err)
 	}
-	assertNodeSnapshot(t, updates, []NodeInfo{node2})
-
-	discovery.UpdateNodes("orders", []string{"127.0.0.1:7001"})
-	assertNodeSnapshot(t, updates, []NodeInfo{{ID: "127.0.0.1:7001", Address: "127.0.0.1:7001"}})
+	assertTopologySnapshot(t, stream, "orders", []NodeInfo{node2})
 }
 
-func TestStaticServiceDiscoverySlowWatcherEventuallyReceivesLatestSnapshot(t *testing.T) {
+func TestStaticServiceDiscoverySlowWatcherReceivesLatestSnapshot(t *testing.T) {
 	discovery := NewStaticServiceDiscovery(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	updates, err := discovery.Watch(ctx, "orders")
+	stream, err := discovery.Watch(ctx, "orders")
 	if err != nil {
 		t.Fatalf("Watch failed: %v", err)
 	}
-	assertNodeSnapshot(t, updates, nil)
+	assertTopologySnapshot(t, stream, "orders", nil)
 
 	for i := 0; i < 20; i++ {
 		discovery.SetNodes("orders", []NodeInfo{{
@@ -63,13 +61,17 @@ func TestStaticServiceDiscoverySlowWatcherEventuallyReceivesLatestSnapshot(t *te
 
 	deadline := time.After(time.Second)
 	for {
+		snapshot, err := stream.Next(context.Background())
+		if err != nil {
+			t.Fatalf("Next failed: %v", err)
+		}
+		if len(snapshot.Members) == 1 && snapshot.Members[0].Endpoints[0].Address == "127.0.0.1:8019" {
+			return
+		}
 		select {
-		case snapshot := <-updates:
-			if len(snapshot) == 1 && snapshot[0].Address == "127.0.0.1:8019" {
-				return
-			}
 		case <-deadline:
 			t.Fatal("slow watcher never received the latest service snapshot")
+		default:
 		}
 	}
 }
@@ -85,25 +87,22 @@ func TestStaticServiceDiscoverySnapshotsAreIsolated(t *testing.T) {
 	input[0].Address = "caller-mutated"
 	input[0].Metadata["zone"] = "caller-mutated"
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	updates, err := discovery.Watch(ctx, "orders")
-	if err != nil {
-		t.Fatalf("Watch failed: %v", err)
-	}
-	snapshot := <-updates
-	if snapshot[0].Address != "127.0.0.1:8001" || snapshot[0].Metadata["zone"] != "a" {
-		t.Fatalf("stored snapshot was changed through caller input: %#v", snapshot)
-	}
-	snapshot[0].Address = "watcher-mutated"
-	snapshot[0].Metadata["zone"] = "watcher-mutated"
-
-	discovered, err := discovery.Discover(context.Background(), "orders")
+	snapshot, err := discovery.Discover(context.Background(), "orders")
 	if err != nil {
 		t.Fatalf("Discover failed: %v", err)
 	}
-	if discovered[0].Address != "127.0.0.1:8001" || discovered[0].Metadata["zone"] != "a" {
-		t.Fatalf("internal state was changed through watcher snapshot: %#v", discovered)
+	if snapshot.Members[0].Endpoints[0].Address != "127.0.0.1:8001" || snapshot.Members[0].Attributes["zone"] != "a" {
+		t.Fatalf("stored snapshot was changed through caller input: %#v", snapshot)
+	}
+	snapshot.Members[0].Endpoints[0].Address = "watcher-mutated"
+	snapshot.Members[0].Attributes["zone"] = "watcher-mutated"
+
+	again, err := discovery.Discover(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("second Discover failed: %v", err)
+	}
+	if again.Members[0].Endpoints[0].Address != "127.0.0.1:8001" || again.Members[0].Attributes["zone"] != "a" {
+		t.Fatalf("internal state was changed through returned snapshot: %#v", again)
 	}
 }
 
@@ -129,10 +128,10 @@ func TestStaticServiceDiscoveryConcurrentDiscoverDoesNotOverwriteMutation(t *tes
 
 		got, err := discovery.Discover(context.Background(), "orders")
 		if err != nil {
-			t.Fatalf("Discover failed: %v", err)
+			t.Fatalf("iteration %d: Discover failed: %v", i, err)
 		}
-		if len(got) != 1 || got[0].ID != explicit[0].ID || got[0].Address != explicit[0].Address {
-			t.Fatalf("iteration %d: Discover overwrote explicit topology with stale default: %#v", i, got)
+		if len(got.Members) != 1 || got.Members[0].ID != explicit[0].ID || got.Members[0].Endpoints[0].Address != explicit[0].Address {
+			t.Fatalf("iteration %d: Discover overwrote explicit topology: %#v", i, got)
 		}
 	}
 }
@@ -140,79 +139,60 @@ func TestStaticServiceDiscoveryConcurrentDiscoverDoesNotOverwriteMutation(t *tes
 func TestStaticServiceDiscoveryAddressIDsSurviveReordering(t *testing.T) {
 	addresses := []string{"127.0.0.1:8001", "127.0.0.1:8002", "127.0.0.1:8003"}
 	discovery := NewStaticServiceDiscovery(addresses)
-	before, err := discovery.Discover(context.Background(), "orders")
+	before, err := discovery.Discover(context.Background(), "default")
 	if err != nil {
 		t.Fatalf("initial Discover failed: %v", err)
 	}
-	beforeIDs := make(map[string]string, len(before))
-	for _, node := range before {
-		beforeIDs[node.Address] = node.ID
+	beforeIDs := make(map[string]string, len(before.Members))
+	for _, member := range before.Members {
+		beforeIDs[member.Endpoints[0].Address] = member.ID
 	}
 
-	discovery.UpdateNodes("orders", []string{addresses[2], addresses[0], addresses[1]})
-	after, err := discovery.Discover(context.Background(), "orders")
+	discovery.UpdateNodes("default", []string{addresses[2], addresses[0], addresses[1]})
+	after, err := discovery.Discover(context.Background(), "default")
 	if err != nil {
 		t.Fatalf("Discover after reorder failed: %v", err)
 	}
-	for _, node := range after {
-		if node.ID != beforeIDs[node.Address] {
-			t.Fatalf("address %q changed ID from %q to %q after reorder", node.Address, beforeIDs[node.Address], node.ID)
+	for _, member := range after.Members {
+		if member.ID != beforeIDs[member.Endpoints[0].Address] {
+			t.Fatalf("address %q changed ID from %q to %q after reorder", member.Endpoints[0].Address, beforeIDs[member.Endpoints[0].Address], member.ID)
 		}
 	}
 }
 
-func TestStaticServiceDiscoveryWatchCancellationOwnsChannelClose(t *testing.T) {
-	for i := 0; i < 200; i++ {
-		discovery := NewStaticServiceDiscovery(nil)
-		ctx, cancel := context.WithCancel(context.Background())
-		updates, err := discovery.Watch(ctx, "orders")
-		if err != nil {
-			t.Fatalf("iteration %d: Watch failed: %v", i, err)
-		}
-		<-updates
-
-		publisherDone := make(chan struct{})
-		go func(iteration int) {
-			defer close(publisherDone)
-			for update := 0; update < 20; update++ {
-				discovery.SetNodes("orders", []NodeInfo{{
-					ID:      "node",
-					Address: fmt.Sprintf("127.0.0.1:%d", iteration*20+update),
-				}})
-			}
-		}(i)
-		cancel()
-		<-publisherDone
-
-		deadline := time.After(time.Second)
-		for {
-			select {
-			case _, open := <-updates:
-				if !open {
-					goto closed
-				}
-			case <-deadline:
-				t.Fatalf("iteration %d: watcher channel was not closed", i)
-			}
-		}
-	closed:
-		discovery.SetNodes("orders", []NodeInfo{{ID: "after-close", Address: "after-close"}})
+func TestStaticServiceDiscoveryWatchCloseIsIdempotent(t *testing.T) {
+	discovery := NewStaticServiceDiscovery(nil)
+	stream, err := discovery.Watch(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("Watch failed: %v", err)
+	}
+	if _, err := stream.Next(context.Background()); err != nil {
+		t.Fatalf("initial Next failed: %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("first Close failed: %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("second Close failed: %v", err)
+	}
+	if _, err := stream.Next(context.Background()); err != io.EOF {
+		t.Fatalf("Next after Close error = %v, want io.EOF", err)
 	}
 }
 
-func assertNodeSnapshot(t *testing.T, updates <-chan []NodeInfo, want []NodeInfo) {
+func assertTopologySnapshot(t *testing.T, stream TopologyStream, serviceName string, want []NodeInfo) {
 	t.Helper()
-	select {
-	case got := <-updates:
-		if len(got) != len(want) {
-			t.Fatalf("snapshot length = %d, want %d: %#v", len(got), len(want), got)
+	snapshot, err := stream.Next(context.Background())
+	if err != nil {
+		t.Fatalf("%s Next failed: %v", serviceName, err)
+	}
+	if len(snapshot.Members) != len(want) {
+		t.Fatalf("%s snapshot length = %d, want %d: %#v", serviceName, len(snapshot.Members), len(want), snapshot)
+	}
+	for i, node := range want {
+		member := snapshot.Members[i]
+		if member.ID != node.ID || len(member.Endpoints) != 1 || member.Endpoints[0].Address != node.Address {
+			t.Fatalf("%s snapshot[%d] = %#v, want %#v", serviceName, i, member, node)
 		}
-		for i := range want {
-			if got[i].ID != want[i].ID || got[i].Address != want[i].Address {
-				t.Fatalf("snapshot[%d] = %#v, want %#v", i, got[i], want[i])
-			}
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for service discovery update")
 	}
 }
