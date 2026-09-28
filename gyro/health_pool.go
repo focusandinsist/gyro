@@ -2,19 +2,19 @@ package gyro
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
-
-	"github.com/focusandinsist/consistent-go/consistent"
 )
 
 // HealthAwarePool wraps a Locator with health checking capabilities.
 type HealthAwarePool struct {
 	monitorMu      sync.Mutex
 	healthChecker  HealthChecker
+	failurePolicy  FailurePolicy
 	snapshot       atomic.Pointer[poolSnapshot]
 	mu             sync.RWMutex
 	closed         bool
@@ -23,6 +23,8 @@ type HealthAwarePool struct {
 	closeErr       error
 	logger         atomic.Pointer[slog.Logger]
 }
+
+var _ HealthView = (*HealthAwarePool)(nil)
 
 type poolSnapshot struct {
 	locator      Locator
@@ -37,8 +39,19 @@ func NewHealthAwarePool(locator Locator, config HealthCheckerConfig) *HealthAwar
 
 // NewHealthAwarePoolWithChecker creates a new health-aware locator with an injected health checker.
 func NewHealthAwarePoolWithChecker(locator Locator, healthChecker HealthChecker) *HealthAwarePool {
+	return NewHealthAwarePoolWithCheckerAndPolicy(locator, healthChecker, PrimaryOnly{})
+}
+
+// NewHealthAwarePoolWithCheckerAndPolicy creates a pool with an explicit
+// failure policy. Resource membership remains owned by the locator; the
+// policy only interprets the pure route candidates and health view.
+func NewHealthAwarePoolWithCheckerAndPolicy(locator Locator, healthChecker HealthChecker, policy FailurePolicy) *HealthAwarePool {
+	if policy == nil {
+		policy = PrimaryOnly{}
+	}
 	hap := &HealthAwarePool{
 		healthChecker: healthChecker,
+		failurePolicy: policy,
 	}
 	hap.logger.Store(discardLogger)
 	healthyNodes := make(map[string]bool)
@@ -118,48 +131,50 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 	if locator == nil {
 		return nil, ErrLocatorClosed
 	}
-	node, err := locator.Get(ctx, key)
+	nodes := locator.GetAllNodes()
+	if len(nodes) == 0 {
+		return nil, ErrNoMembers
+	}
+	policy := hap.failurePolicy
+	if policy == nil {
+		policy = PrimaryOnly{}
+	}
+	nodeByID := make(map[string]Node, len(nodes))
+	members := make([]Member, len(nodes))
+	for i, node := range nodes {
+		nodeByID[node.ID()] = node
+		members[i] = Member{ID: node.ID(), Endpoints: []Endpoint{{Address: node.Address()}}}
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].ID < members[j].ID })
+	selectionNodes, err := locator.GetReplicas(ctx, key, len(nodes))
 	if err != nil {
 		return nil, err
 	}
-
-	// Cheap check against cached health state; no network I/O here.
-	isHealthy, exists := snapshot.healthyNodes[node.ID()]
-
-	if !exists || isHealthy {
-		return node, nil
-	}
-
-	replicaCount := len(locator.GetAllNodes())
-	if replicaCount > 3 {
-		replicaCount = 3
-	}
-	var replicas []Node
-	for replicaCount > 0 {
-		replicas, err = locator.GetReplicas(ctx, key, replicaCount)
-		if err == nil {
-			break
+	selection := CandidateSet{Revision: routeRevision(members), Candidates: make([]Candidate, 0, len(selectionNodes))}
+	seen := make(map[string]struct{}, len(selectionNodes))
+	for _, candidate := range selectionNodes {
+		if _, exists := seen[candidate.ID()]; !exists {
+			selection.Candidates = append(selection.Candidates, Candidate{MemberID: candidate.ID()})
+			seen[candidate.ID()] = struct{}{}
 		}
-		if !errors.Is(err, consistent.ErrInsufficientMemberCount) {
-			return nil, err
-		}
-		replicaCount--
 	}
+	if len(selection.Candidates) == 0 {
+		return nil, ErrNoEligibleCandidate
+	}
+	routeSnapshot := TopologySnapshot{Revision: selection.Revision, Members: members}
+	decision, err := policy.Decide(ctx, RouteRequest{Key: key}, routeSnapshot, selection, hap)
 	if err != nil {
 		return nil, err
 	}
+	return nodeByID[decision.Primary.ID], nil
+}
 
-	for _, replica := range replicas {
-		if replica.ID() == node.ID() {
-			continue // already known unhealthy
-		}
-		if healthy, exists := snapshot.healthyNodes[replica.ID()]; !exists || healthy {
-			return replica, nil
-		}
+func routeRevision(members []Member) Revision {
+	ids := make([]string, len(members))
+	for i, member := range members {
+		ids[i] = member.ID
 	}
-
-	// Every replica is unhealthy too; return the primary and let the caller decide.
-	return node, nil
+	return Revision{Source: "locator", Generation: 1, Token: strings.Join(ids, "\x00")}
 }
 
 // StartHealthMonitoring starts health monitoring for all nodes in the locator.
@@ -314,6 +329,40 @@ func (hap *HealthAwarePool) IsNodeHealthy(nodeID string) bool {
 	snapshot := hap.currentSnapshot()
 	healthy, exists := snapshot.healthyNodes[nodeID]
 	return !exists || healthy // unknown nodes are assumed healthy
+}
+
+// Status exposes the pool's health observation without selecting a fallback
+// node. Unknown members remain Unknown for explicit failure policies.
+func (hap *HealthAwarePool) Status(nodeID string) HealthStatus {
+	if checker, ok := hap.healthChecker.(HealthView); ok {
+		return checker.Status(nodeID)
+	}
+	snapshot := hap.currentSnapshot()
+	healthy, exists := snapshot.healthyNodes[nodeID]
+	if !exists {
+		return Unknown
+	}
+	if healthy {
+		return Healthy
+	}
+	return Unhealthy
+}
+
+// Snapshot returns a detached health view for the active pool.
+func (hap *HealthAwarePool) Snapshot() map[string]HealthStatus {
+	if checker, ok := hap.healthChecker.(HealthView); ok {
+		return checker.Snapshot()
+	}
+	snapshot := hap.currentSnapshot()
+	result := make(map[string]HealthStatus, len(snapshot.healthyNodes))
+	for nodeID, healthy := range snapshot.healthyNodes {
+		if healthy {
+			result[nodeID] = Healthy
+		} else {
+			result[nodeID] = Unhealthy
+		}
+	}
+	return result
 }
 
 // GetStats returns statistics about the health-aware pool including health status.

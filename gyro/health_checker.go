@@ -264,6 +264,40 @@ func (hc *DefaultHealthChecker) IsNodeHealthy(nodeID string) bool {
 	return stats.IsHealthy
 }
 
+// Status returns the observed health state. A registered node remains Unknown
+// until its first completed probe; this is intentionally separate from the
+// legacy IsNodeHealthy optimistic boolean API.
+func (hc *DefaultHealthChecker) Status(nodeID string) HealthStatus {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	stats, exists := hc.nodeStats[nodeID]
+	if !exists || stats.LastCheckTime.IsZero() {
+		return Unknown
+	}
+	if stats.IsHealthy {
+		return Healthy
+	}
+	return Unhealthy
+}
+
+// Snapshot returns a detached health view for all registered or observed
+// nodes. The returned map is safe for callers to modify.
+func (hc *DefaultHealthChecker) Snapshot() map[string]HealthStatus {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	result := make(map[string]HealthStatus, len(hc.nodeStats))
+	for nodeID, stats := range hc.nodeStats {
+		if stats.LastCheckTime.IsZero() {
+			result[nodeID] = Unknown
+		} else if stats.IsHealthy {
+			result[nodeID] = Healthy
+		} else {
+			result[nodeID] = Unhealthy
+		}
+	}
+	return result
+}
+
 // GetNodeStats returns health statistics for a node.
 func (hc *DefaultHealthChecker) GetNodeStats(nodeID string) *NodeHealthStats {
 	hc.mu.RLock()

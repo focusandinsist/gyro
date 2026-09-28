@@ -47,7 +47,7 @@ func New(addresses []string, locatorConfig gyro.LocatorConfig, healthConfig gyro
 	if checker == nil {
 		checker = gyro.NewDefaultHealthChecker(healthConfig)
 	}
-	pool := gyro.NewHealthAwarePoolWithChecker(base, checker)
+	pool := gyro.NewHealthAwarePoolWithCheckerAndPolicy(base, checker, gyro.HealthyCandidate{AllowUnknown: true})
 	healthCtx, cancel := context.WithCancel(context.Background())
 	pool.StartHealthMonitoring(healthCtx)
 	return &Runtime{locator: pool, pool: pool, cancel: cancel}, nil

@@ -2,6 +2,7 @@ package gyro
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -171,7 +172,7 @@ func TestHealthAwarePoolSmallClusterFailover(t *testing.T) {
 			}
 
 			checker := &controllableHealthChecker{config: DefaultHealthCheckerConfig()}
-			pool := NewHealthAwarePoolWithChecker(locator, checker)
+			pool := NewHealthAwarePoolWithCheckerAndPolicy(locator, checker, HealthyCandidate{AllowUnknown: true})
 			pool.StartHealthMonitoring(context.Background())
 			defer pool.Close()
 
@@ -183,11 +184,14 @@ func TestHealthAwarePoolSmallClusterFailover(t *testing.T) {
 			checker.Emit(primary.ID(), false)
 
 			got, err := pool.Get(context.Background(), key)
+			if nodeCount == 1 {
+				if !errors.Is(err, ErrNoEligibleCandidate) {
+					t.Fatalf("single-node unhealthy error = %v, want ErrNoEligibleCandidate", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Get with %d nodes returned an error: %v", nodeCount, err)
-			}
-			if nodeCount == 1 && got.ID() != primary.ID() {
-				t.Fatalf("single-node fallback returned %q, want primary %q", got.ID(), primary.ID())
 			}
 			if nodeCount == 2 && got.ID() == primary.ID() {
 				t.Fatalf("two-node failover returned unhealthy primary %q", primary.ID())

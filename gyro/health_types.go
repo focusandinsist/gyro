@@ -6,6 +6,21 @@ import (
 	"time"
 )
 
+// HealthStatus is the observation state of one topology member.
+type HealthStatus uint8
+
+const (
+	Unknown HealthStatus = iota
+	Healthy
+	Unhealthy
+)
+
+// HealthView is a read-only, concurrency-safe health observation seam.
+type HealthView interface {
+	Status(memberID string) HealthStatus
+	Snapshot() map[string]HealthStatus
+}
+
 // HealthChecker provides health checking capabilities for nodes.
 type HealthChecker interface {
 	Check(ctx context.Context, node Node) error
@@ -16,6 +31,8 @@ type HealthChecker interface {
 	IsNodeHealthy(nodeID string) bool
 	AddHealthListener(listener HealthListener)
 }
+
+var _ HealthView = (*DefaultHealthChecker)(nil)
 
 // ConfigurableHealthChecker optionally supports runtime configuration changes.
 // HealthChecker implementations that do not need dynamic configuration do not
