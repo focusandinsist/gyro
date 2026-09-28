@@ -10,6 +10,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
+	clientpkg "github.com/focusandinsist/gyro/client"
 	"github.com/focusandinsist/gyro/gyro"
 	"github.com/focusandinsist/gyro/internal/policy"
 	"github.com/focusandinsist/gyro/internal/routed"
@@ -31,7 +32,7 @@ type DefaultConnection struct {
 }
 
 // NewConnection creates a connection backed by go-redis.
-func NewConnection(address string, config gyro.ConnectionConfig) (Connection, error) {
+func NewConnection(address string, config clientpkg.ConnectionConfig) (Connection, error) {
 	client := goredis.NewClient(&goredis.Options{
 		Addr:            address,
 		Protocol:        2, // for broader compatibility
@@ -139,16 +140,16 @@ func (rn *Node) GetNativeClient() any {
 }
 
 type ClientConfig struct {
-	Locator       gyro.LocatorConfig       `json:"locator"`
-	HealthChecker gyro.HealthCheckerConfig `json:"health_checker"`
-	Connection    gyro.ConnectionConfig    `json:"connection"`
+	Locator       gyro.LocatorConfig         `json:"locator"`
+	HealthChecker gyro.HealthCheckerConfig   `json:"health_checker"`
+	Connection    clientpkg.ConnectionConfig `json:"connection"`
 }
 
 func DefaultClientConfig() *ClientConfig {
 	return &ClientConfig{
 		Locator:       gyro.DefaultLocatorConfig(),
 		HealthChecker: gyro.DefaultHealthCheckerConfig(),
-		Connection:    gyro.DefaultConnectionConfig(),
+		Connection:    clientpkg.DefaultConnectionConfig(),
 	}
 }
 
@@ -262,7 +263,7 @@ func NewCluster(addresses []string) (*Client, error) {
 // NodeFactory creates Redis nodes.
 type NodeFactory struct {
 	config        *ClientConfig
-	newConnection func(address string, config gyro.ConnectionConfig) (Connection, error)
+	newConnection func(address string, config clientpkg.ConnectionConfig) (Connection, error)
 }
 
 // NewNodeFactory creates a new Redis node factory.
@@ -276,7 +277,7 @@ func NewNodeFactory() *NodeFactory {
 // WithConnectionConfig returns an independent factory for a new connection
 // configuration. The current factory remains unchanged until a Client has
 // successfully built and published the replacement locator.
-func (f *NodeFactory) WithConnectionConfig(connectionConfig gyro.ConnectionConfig) (gyro.NodeFactory, error) {
+func (f *NodeFactory) WithConnectionConfig(connectionConfig clientpkg.ConnectionConfig) (gyro.NodeFactory, error) {
 	if f == nil || f.config == nil {
 		return nil, fmt.Errorf("Redis node factory is not initialized")
 	}

@@ -32,8 +32,6 @@ type HealthChecker interface {
 	AddHealthListener(listener HealthListener)
 }
 
-var _ HealthView = (*DefaultHealthChecker)(nil)
-
 // ConfigurableHealthChecker optionally supports runtime configuration changes.
 // HealthChecker implementations that do not need dynamic configuration do not
 // need to implement this interface.
@@ -94,11 +92,6 @@ type NodeHealthStats struct {
 
 // HealthListener receives a node health transition after its threshold is met.
 type HealthListener func(nodeID string, healthy bool)
-
-type healthProbe struct {
-	node       Node
-	generation uint64
-}
 
 // HealthAwarePoolStats contains statistics about a health-aware pool
 type HealthAwarePoolStats struct {

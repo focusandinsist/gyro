@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 
 	"github.com/focusandinsist/consistent-go/consistent"
 )
+
+var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // Locator routes keys to nodes and owns node membership and shutdown.
 type Locator interface {

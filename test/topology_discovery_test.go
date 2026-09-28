@@ -6,11 +6,13 @@ import (
 	"io"
 	"testing"
 
+	"github.com/focusandinsist/gyro/discovery/static"
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/topology"
 )
 
 func TestStaticDiscoveryPublishesVersionedSnapshotsAndCoalescesUpdates(t *testing.T) {
-	discovery := gyro.NewStaticServiceDiscovery([]string{"node-a", "node-b"})
+	discovery := static.New([]string{"node-a", "node-b"})
 	ctx := context.Background()
 	stream, err := discovery.Watch(ctx, "default")
 	if err != nil {
@@ -34,7 +36,7 @@ func TestStaticDiscoveryPublishesVersionedSnapshotsAndCoalescesUpdates(t *testin
 	if second.Revision.Source != first.Revision.Source || second.Revision.Generation <= first.Revision.Generation {
 		t.Fatalf("revision did not advance within source: first=%#v second=%#v", first.Revision, second.Revision)
 	}
-	diff := gyro.DiffTopologySnapshots(first, second)
+	diff := topology.Diff(first, second)
 	if len(diff.Added) != 0 || len(diff.Removed) != 0 || len(diff.Updated) != 0 {
 		t.Fatalf("member reorder produced a topology change: %#v", diff)
 	}
@@ -44,14 +46,14 @@ func TestStaticDiscoveryPublishesVersionedSnapshotsAndCoalescesUpdates(t *testin
 	if err != nil {
 		t.Fatalf("updated Next failed: %v", err)
 	}
-	diff = gyro.DiffTopologySnapshots(second, third)
+	diff = topology.Diff(second, third)
 	if len(diff.Added) != 1 || diff.Added[0].ID != "node-c" || len(diff.Removed) != 2 {
 		t.Fatalf("unexpected topology diff: %#v", diff)
 	}
 }
 
 func TestStaticDiscoveryStreamCloseStopsNextAndIsIdempotent(t *testing.T) {
-	discovery := gyro.NewStaticServiceDiscovery(nil)
+	discovery := static.New(nil)
 	stream, err := discovery.Watch(context.Background(), "default")
 	if err != nil {
 		t.Fatalf("Watch failed: %v", err)
@@ -71,7 +73,7 @@ func TestStaticDiscoveryStreamCloseStopsNextAndIsIdempotent(t *testing.T) {
 }
 
 func TestServiceTopologySourceScopesServiceDiscovery(t *testing.T) {
-	discovery := gyro.NewStaticServiceDiscovery(nil)
+	discovery := static.New(nil)
 	discovery.SetNodes("orders", []gyro.NodeInfo{{ID: "orders-1", Address: "orders:1"}})
 	source, err := gyro.NewServiceTopologySource(discovery, "orders")
 	if err != nil {
@@ -95,7 +97,7 @@ func TestTopologyDiffReturnsDetachedMembers(t *testing.T) {
 		Revision: gyro.Revision{Source: "source", Generation: 2},
 		Members:  []gyro.Member{{ID: "member", Endpoints: []gyro.Endpoint{{Address: "new", Attributes: map[string]string{"zone": "b"}}}}},
 	}
-	diff := gyro.DiffTopologySnapshots(previous, current)
+	diff := topology.Diff(previous, current)
 	if len(diff.Updated) != 1 || diff.Updated[0].Endpoints[0].Address != "new" {
 		t.Fatalf("unexpected update diff: %#v", diff)
 	}

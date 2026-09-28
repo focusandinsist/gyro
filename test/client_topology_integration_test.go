@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	clientpkg "github.com/focusandinsist/gyro/client"
 	"github.com/focusandinsist/gyro/gyro"
 )
 
@@ -16,12 +17,12 @@ func TestClientRetainsTopologyAndMarksItStaleAfterWatchClose(t *testing.T) {
 		Members:  []gyro.Member{{ID: "node-a", Endpoints: []gyro.Endpoint{{Address: "node-a"}}}},
 	}
 	discovery := newScriptedDiscovery(snapshot)
-	config := gyro.DefaultConfig()
+	config := clientpkg.DefaultConfig()
 	config.HealthChecker.Enabled = false
-	client, err := gyro.NewClient(
+	client, err := clientpkg.NewClient(
 		"orders",
 		discovery,
-		gyro.NewConfigManager(config),
+		clientpkg.NewConfigManager(config),
 		testNodeFactory{},
 		testHealthChecker{},
 	)
@@ -66,9 +67,9 @@ func TestClientRejectsRetiredSourceEventsAfterReconnect(t *testing.T) {
 	retiredA := sourceA
 	retiredA.Revision.Generation = 100
 	discovery := newSequencedDiscovery(sourceA, sourceB, retiredA)
-	config := gyro.DefaultConfig()
+	config := clientpkg.DefaultConfig()
 	config.HealthChecker.Enabled = false
-	client, err := gyro.NewClient("orders", discovery, gyro.NewConfigManager(config), testNodeFactory{}, testHealthChecker{})
+	client, err := clientpkg.NewClient("orders", discovery, clientpkg.NewConfigManager(config), testNodeFactory{}, testHealthChecker{})
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}

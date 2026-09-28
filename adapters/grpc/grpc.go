@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
+	clientpkg "github.com/focusandinsist/gyro/client"
 	"github.com/focusandinsist/gyro/gyro"
 	"github.com/focusandinsist/gyro/internal/policy"
 	"github.com/focusandinsist/gyro/internal/routed"
@@ -33,7 +34,7 @@ type Connection interface {
 type DefaultConnection struct {
 	address   string
 	conn      *grpc.ClientConn
-	config    gyro.ConnectionConfig
+	config    clientpkg.ConnectionConfig
 	connected atomic.Bool
 }
 
@@ -41,7 +42,7 @@ type DefaultConnection struct {
 // timeouts to health-check dialing and RPC contexts. gRPC multiplexes streams over one
 // transport, so MaxActiveConns and MaxIdleConns do not map to a connection
 // pool and are intentionally not used.
-func NewConnection(address string, config gyro.ConnectionConfig) (Connection, error) {
+func NewConnection(address string, config clientpkg.ConnectionConfig) (Connection, error) {
 	if config.ConnectTimeout < 0 || config.ReadTimeout < 0 || config.WriteTimeout < 0 || config.IdleTimeout < 0 {
 		return nil, fmt.Errorf("gRPC connection timeouts cannot be negative")
 	}
@@ -69,7 +70,7 @@ func NewConnection(address string, config gyro.ConnectionConfig) (Connection, er
 	return c, nil
 }
 
-func timeoutUnaryInterceptor(config gyro.ConnectionConfig) grpc.UnaryClientInterceptor {
+func timeoutUnaryInterceptor(config clientpkg.ConnectionConfig) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, request, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, options ...grpc.CallOption) error {
 		timeout := config.ReadTimeout
 		if timeout <= 0 || (config.ConnectTimeout > 0 && config.ConnectTimeout < timeout) {
@@ -84,7 +85,7 @@ func timeoutUnaryInterceptor(config gyro.ConnectionConfig) grpc.UnaryClientInter
 	}
 }
 
-func timeoutStreamInterceptor(config gyro.ConnectionConfig) grpc.StreamClientInterceptor {
+func timeoutStreamInterceptor(config clientpkg.ConnectionConfig) grpc.StreamClientInterceptor {
 	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, options ...grpc.CallOption) (grpc.ClientStream, error) {
 		timeout := config.ReadTimeout
 		if timeout <= 0 || (config.WriteTimeout > 0 && config.WriteTimeout < timeout) {
@@ -231,16 +232,16 @@ func (gn *Node) GetNativeClient() any {
 }
 
 type ClientConfig struct {
-	Locator       gyro.LocatorConfig       `json:"locator"`
-	HealthChecker gyro.HealthCheckerConfig `json:"health_checker"`
-	Connection    gyro.ConnectionConfig    `json:"connection"`
+	Locator       gyro.LocatorConfig         `json:"locator"`
+	HealthChecker gyro.HealthCheckerConfig   `json:"health_checker"`
+	Connection    clientpkg.ConnectionConfig `json:"connection"`
 }
 
 func DefaultClientConfig() *ClientConfig {
 	return &ClientConfig{
 		Locator:       gyro.DefaultLocatorConfig(),
 		HealthChecker: gyro.DefaultHealthCheckerConfig(),
-		Connection:    gyro.DefaultConnectionConfig(),
+		Connection:    clientpkg.DefaultConnectionConfig(),
 	}
 }
 
@@ -357,7 +358,7 @@ func NewCluster(addresses []string) (*Client, error) {
 // NodeFactory creates gRPC nodes.
 type NodeFactory struct {
 	config        *ClientConfig
-	newConnection func(address string, config gyro.ConnectionConfig) (Connection, error)
+	newConnection func(address string, config clientpkg.ConnectionConfig) (Connection, error)
 }
 
 // NewNodeFactory creates a new gRPC node factory.
@@ -371,7 +372,7 @@ func NewNodeFactory() *NodeFactory {
 // WithConnectionConfig returns an independent factory for a new connection
 // configuration. The current factory remains unchanged until a Client has
 // successfully built and published the replacement locator.
-func (f *NodeFactory) WithConnectionConfig(connectionConfig gyro.ConnectionConfig) (gyro.NodeFactory, error) {
+func (f *NodeFactory) WithConnectionConfig(connectionConfig clientpkg.ConnectionConfig) (gyro.NodeFactory, error) {
 	if f == nil || f.config == nil {
 		return nil, fmt.Errorf("gRPC node factory is not initialized")
 	}

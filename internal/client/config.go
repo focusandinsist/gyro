@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/focusandinsist/gyro/gyro"
 )
 
 // Config is the configuration for Gyro clients, composed of the
@@ -23,14 +25,7 @@ type ConfigManager struct {
 }
 
 // ConnectionConfig configures connection-specific behavior.
-type ConnectionConfig struct {
-	MaxIdleConns   int           `json:"max_idle_conns"`
-	MaxActiveConns int           `json:"max_active_conns"`
-	IdleTimeout    time.Duration `json:"idle_timeout"`
-	ConnectTimeout time.Duration `json:"connect_timeout"`
-	ReadTimeout    time.Duration `json:"read_timeout"`
-	WriteTimeout   time.Duration `json:"write_timeout"`
-}
+type ConnectionConfig = gyro.ConnectionConfig
 
 // DefaultConnectionConfig returns connection defaults suitable for adapters.
 func DefaultConnectionConfig() ConnectionConfig {

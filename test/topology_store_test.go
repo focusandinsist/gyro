@@ -8,10 +8,11 @@ import (
 	"testing"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/topology"
 )
 
 func TestTopologyStorePublishesAndNormalizesCompleteSnapshots(t *testing.T) {
-	store := gyro.NewTopologyStore()
+	store := topology.NewStore()
 	input := gyro.TopologySnapshot{
 		Revision: gyro.Revision{Source: "source-a", Generation: 1, Token: "v1"},
 		Members: []gyro.Member{
@@ -43,7 +44,7 @@ func TestTopologyStorePublishesAndNormalizesCompleteSnapshots(t *testing.T) {
 }
 
 func TestTopologyStoreRevisionRules(t *testing.T) {
-	store := gyro.NewTopologyStore()
+	store := topology.NewStore()
 	base := gyro.TopologySnapshot{Revision: gyro.Revision{Source: "source-a", Generation: 2, Token: "v2"}}
 	if err := store.Publish(context.Background(), base); err != nil {
 		t.Fatalf("base Publish failed: %v", err)
@@ -69,7 +70,7 @@ func TestTopologyStoreRevisionRules(t *testing.T) {
 }
 
 func TestTopologyStoreResetSourceReplacesActiveSource(t *testing.T) {
-	store := gyro.NewTopologyStore()
+	store := topology.NewStore()
 	if err := store.Publish(context.Background(), gyro.TopologySnapshot{
 		Revision: gyro.Revision{Source: "source-a", Generation: 99, Token: "old"},
 	}); err != nil {
@@ -95,7 +96,7 @@ func TestTopologyStoreResetSourceReplacesActiveSource(t *testing.T) {
 }
 
 func TestTopologyStoreSameSourceResetCannotRollBack(t *testing.T) {
-	store := gyro.NewTopologyStore()
+	store := topology.NewStore()
 	current := gyro.TopologySnapshot{Revision: gyro.Revision{Source: "source", Generation: 2, Token: "v2"}}
 	if err := store.Publish(context.Background(), current); err != nil {
 		t.Fatalf("initial Publish failed: %v", err)
@@ -120,7 +121,7 @@ func TestTopologyStoreRejectsInvalidSnapshots(t *testing.T) {
 		{Revision: gyro.Revision{Source: "source", Generation: 1}, Members: []gyro.Member{{ID: "member", Endpoints: []gyro.Endpoint{{Address: "same"}, {Address: "same"}}}}},
 	}
 	for i, snapshot := range cases {
-		store := gyro.NewTopologyStore()
+		store := topology.NewStore()
 		if err := store.Publish(context.Background(), snapshot); !errors.Is(err, gyro.ErrInvalidSnapshot) {
 			t.Errorf("case %d error = %v, want ErrInvalidSnapshot", i, err)
 		}
@@ -131,7 +132,7 @@ func TestTopologyStoreRejectsInvalidSnapshots(t *testing.T) {
 }
 
 func TestTopologyStoreTreatsEndpointAttributesAsPartOfIdentity(t *testing.T) {
-	store := gyro.NewTopologyStore()
+	store := topology.NewStore()
 	snapshot := gyro.TopologySnapshot{
 		Revision: gyro.Revision{Source: "source", Generation: 1},
 		Members: []gyro.Member{{
@@ -152,7 +153,7 @@ func TestTopologyStoreTreatsEndpointAttributesAsPartOfIdentity(t *testing.T) {
 }
 
 func TestTopologyStoreSnapshotsAreDeeplyIsolated(t *testing.T) {
-	store := gyro.NewTopologyStore()
+	store := topology.NewStore()
 	input := gyro.TopologySnapshot{
 		Revision: gyro.Revision{Source: "source", Generation: 1, Token: "v1"},
 		Members: []gyro.Member{{
@@ -180,7 +181,7 @@ func TestTopologyStoreSnapshotsAreDeeplyIsolated(t *testing.T) {
 }
 
 func TestTopologyStoreConcurrentSnapshotsAreWholeValues(t *testing.T) {
-	store := gyro.NewTopologyStore()
+	store := topology.NewStore()
 	if err := store.Publish(context.Background(), topologyForGeneration(0)); err != nil {
 		t.Fatalf("initial Publish failed: %v", err)
 	}

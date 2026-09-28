@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/health"
 )
 
 type healthViewNode struct{}
@@ -15,7 +16,7 @@ func (healthViewNode) IsHealthy(context.Context) bool { return true }
 func (healthViewNode) Close() error                   { return nil }
 
 func TestDefaultHealthCheckerPublishesUnknownUntilFirstProbeAndCleansRemovedNode(t *testing.T) {
-	checker := gyro.NewDefaultHealthChecker(gyro.DefaultHealthCheckerConfig())
+	checker := health.NewChecker(gyro.DefaultHealthCheckerConfig())
 	node := healthViewNode{}
 	checker.AddNode(node)
 	if got := checker.Status("node-a"); got != gyro.Unknown {

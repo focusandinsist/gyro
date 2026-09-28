@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	clientpkg "github.com/focusandinsist/gyro/client"
 	"github.com/focusandinsist/gyro/gyro"
 	"github.com/focusandinsist/gyro/internal/health"
 )
@@ -57,7 +58,7 @@ func TestGRPCConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	connections := make(map[string]*testGRPCConnection)
 	factory := &NodeFactory{
 		config: config,
-		newConnection: func(address string, _ gyro.ConnectionConfig) (Connection, error) {
+		newConnection: func(address string, _ clientpkg.ConnectionConfig) (Connection, error) {
 			connection := newTestGRPCConnection(address)
 			connections[address] = connection
 			return connection, nil
@@ -137,7 +138,7 @@ func TestGRPCConvenienceClientRejectsInvalidHealthConfig(t *testing.T) {
 }
 
 func TestNewGRPCConnectionRejectsNegativeTimeouts(t *testing.T) {
-	config := gyro.DefaultConnectionConfig()
+	config := clientpkg.DefaultConnectionConfig()
 	config.ConnectTimeout = -time.Second
 	if _, err := NewConnection("localhost:1", config); err == nil {
 		t.Fatal("expected negative connection timeout to be rejected")

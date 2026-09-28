@@ -7,29 +7,25 @@ Concrete selectors, failure policies, and resource pools live under
 
 ## Public Entry Points
 
-- `gyro.go`: package overview for the public contracts.
+- `topology.go`, `routing.go`, `failure_api.go`: public routing and topology contracts.
 - `node.go`: runtime node and node-factory interfaces.
-- `config.go`: `Config`, defaults, and `ConfigManager`.
-- `discovery.go`: legacy discovery contracts; use `discovery/static` for the
+- `connection.go`: protocol-neutral connection settings.
+- `discovery.go`: discovery contracts; use `discovery/static` for the
   reference implementation.
-- `client.go`: transitional client implementation; use the public `client`
-  facade for dynamic discovery/configuration.
+- `topology_diff_api.go`: the public topology diff value returned by
+  `internal/topology`.
 
 ## Client and Runtime Implementation
 
-- `client_lifecycle.go`: start, stop, restart, and close.
-- `client_topology.go`: discovery watches, topology reconciliation, and config replacement.
-- `client_health.go`: client health and routing summaries.
 - `../client`: public facade backed by `../internal/client`.
 - `../internal/routed`: adapter shared lifecycle composition.
 
 ## Public Contracts
 
 - `health_types.go`: health contracts, configuration, and statistics.
-- `health_checker.go`, `health_pool.go`, and `locator.go` are legacy runtime
-  files retained only while downstream code is migrated. New code should use
-  the `health`, `internal/health`, `internal/selector`, and `internal/routed`
-  seams instead.
+- `locator.go` remains the stateful node-membership seam used by the internal
+  client and routed runtime. Health checking and pooling are owned by
+  `internal/health`.
 
 ## Internal Implementations
 
@@ -42,6 +38,6 @@ Concrete selectors, failure policies, and resource pools live under
 
 ## Tests
 
-Tests are colocated because many core tests intentionally exercise unexported
-state and lock boundaries. `api_contract_test.go` is the black-box exception;
-it uses `package gyro_test` and verifies the public implementation contracts.
+Implementation tests live with their owning `internal/` package. The public
+contract package has no white-box implementation test suite; cross-package
+behaviour is covered under `../test`.

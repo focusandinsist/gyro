@@ -206,7 +206,15 @@ func (s *staticStream) Next(ctx context.Context) (gyro.TopologySnapshot, error) 
 		return gyro.TopologySnapshot{}, ctx.Err()
 	case <-s.done:
 		return gyro.TopologySnapshot{}, io.EOF
-	case snapshot := <-s.updates:
+	case snapshot, ok := <-s.updates:
+		if !ok {
+			return gyro.TopologySnapshot{}, io.EOF
+		}
+		select {
+		case <-s.done:
+			return gyro.TopologySnapshot{}, io.EOF
+		default:
+		}
 		return cloneSnapshot(snapshot), nil
 	}
 }

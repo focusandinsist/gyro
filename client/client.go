@@ -23,3 +23,5 @@ func NewClient(serviceName string, discovery gyro.ServiceDiscovery, configManage
 func NewConfigManager(config *Config) *ConfigManager { return internalclient.NewConfigManager(config) }
 
 func DefaultConfig() *Config { return internalclient.DefaultConfig() }
+
+func DefaultConnectionConfig() ConnectionConfig { return internalclient.DefaultConnectionConfig() }

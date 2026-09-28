@@ -9,6 +9,7 @@ import (
 	"github.com/focusandinsist/gyro/internal/policy"
 	"github.com/focusandinsist/gyro/internal/resource"
 	"github.com/focusandinsist/gyro/internal/selector"
+	"github.com/focusandinsist/gyro/internal/topology"
 )
 
 type workerResource struct {
@@ -98,7 +99,7 @@ func TestWorkerRoutingEndToEndUsesTopologySelectorPolicyAndResources(t *testing.
 		t.Fatalf("HealthyCandidate decision = %#v, error=%v", decision, err)
 	}
 
-	store := gyro.NewTopologyStore()
+	store := topology.NewStore()
 	if err := store.Publish(ctx, snapshot); err != nil {
 		t.Fatal(err)
 	}

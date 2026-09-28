@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	clientpkg "github.com/focusandinsist/gyro/client"
 	"github.com/focusandinsist/gyro/gyro"
 	"github.com/focusandinsist/gyro/internal/health"
 )
@@ -55,7 +56,7 @@ func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	connections := make(map[string]*testRedisConnection)
 	factory := &NodeFactory{
 		config: config,
-		newConnection: func(address string, _ gyro.ConnectionConfig) (Connection, error) {
+		newConnection: func(address string, _ clientpkg.ConnectionConfig) (Connection, error) {
 			connection := newTestRedisConnection(address)
 			connections[address] = connection
 			return connection, nil
