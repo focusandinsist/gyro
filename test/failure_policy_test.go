@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/policy"
 )
 
 type testHealthView map[string]gyro.HealthStatus
@@ -49,7 +50,7 @@ func policySelection(snapshot gyro.TopologySnapshot) gyro.CandidateSet {
 func TestPrimaryOnlyDoesNotFailOverAndPreservesCandidates(t *testing.T) {
 	snapshot := policySnapshot()
 	selection := policySelection(snapshot)
-	decision, err := (gyro.PrimaryOnly{}).Decide(
+	decision, err := (policy.PrimaryOnly{}).Decide(
 		context.Background(), gyro.RouteRequest{Key: "key"}, snapshot, selection,
 		testHealthView{"a": gyro.Healthy, "b": gyro.Unhealthy, "c": gyro.Healthy},
 	)
@@ -68,7 +69,7 @@ func TestPrimaryOnlyRejectsUnhealthyOrUnknownPrimary(t *testing.T) {
 	snapshot := policySnapshot()
 	selection := policySelection(snapshot)
 	for _, status := range []gyro.HealthStatus{gyro.Unknown, gyro.Unhealthy} {
-		_, err := (gyro.PrimaryOnly{}).Decide(context.Background(), gyro.RouteRequest{Key: "key"}, snapshot, selection, testHealthView{"a": status})
+		_, err := (policy.PrimaryOnly{}).Decide(context.Background(), gyro.RouteRequest{Key: "key"}, snapshot, selection, testHealthView{"a": status})
 		if !errors.Is(err, gyro.ErrFailoverNotAllowed) {
 			t.Fatalf("status %v error = %v, want ErrFailoverNotAllowed", status, err)
 		}
@@ -79,17 +80,17 @@ func TestHealthyCandidateSelectsFirstEligibleAndControlsUnknown(t *testing.T) {
 	snapshot := policySnapshot()
 	selection := policySelection(snapshot)
 	health := testHealthView{"a": gyro.Unhealthy, "b": gyro.Healthy, "c": gyro.Healthy}
-	decision, err := (gyro.HealthyCandidate{}).Decide(context.Background(), gyro.RouteRequest{Key: "key"}, snapshot, selection, health)
+	decision, err := (policy.HealthyCandidate{}).Decide(context.Background(), gyro.RouteRequest{Key: "key"}, snapshot, selection, health)
 	if err != nil {
 		t.Fatalf("HealthyCandidate failed: %v", err)
 	}
 	if decision.Primary.ID != "b" || len(decision.Candidates) != 2 || decision.Candidates[0].ID != "a" || decision.Candidates[1].ID != "c" {
 		t.Fatalf("unexpected failover decision: %#v", decision)
 	}
-	if _, err := (gyro.HealthyCandidate{}).Decide(context.Background(), gyro.RouteRequest{Key: "key"}, snapshot, selection, testHealthView{}); !errors.Is(err, gyro.ErrNoEligibleCandidate) {
+	if _, err := (policy.HealthyCandidate{}).Decide(context.Background(), gyro.RouteRequest{Key: "key"}, snapshot, selection, testHealthView{}); !errors.Is(err, gyro.ErrNoEligibleCandidate) {
 		t.Fatalf("unknown-only error = %v, want ErrNoEligibleCandidate", err)
 	}
-	decision, err = (gyro.HealthyCandidate{AllowUnknown: true}).Decide(context.Background(), gyro.RouteRequest{Key: "key"}, snapshot, selection, testHealthView{})
+	decision, err = (policy.HealthyCandidate{AllowUnknown: true}).Decide(context.Background(), gyro.RouteRequest{Key: "key"}, snapshot, selection, testHealthView{})
 	if err != nil || decision.Primary.ID != "a" {
 		t.Fatalf("AllowUnknown decision = %#v, error = %v", decision, err)
 	}
@@ -99,14 +100,14 @@ func TestFailurePolicyRejectsMismatchedSelectionAndCanceledRequest(t *testing.T)
 	snapshot := policySnapshot()
 	selection := policySelection(snapshot)
 	selection.Revision.Generation++
-	_, err := (gyro.PrimaryOnly{}).Decide(context.Background(), gyro.RouteRequest{Key: "key"}, snapshot, selection, testHealthView{"a": gyro.Healthy})
+	_, err := (policy.PrimaryOnly{}).Decide(context.Background(), gyro.RouteRequest{Key: "key"}, snapshot, selection, testHealthView{"a": gyro.Healthy})
 	if !errors.Is(err, gyro.ErrSelectionMismatch) {
 		t.Fatalf("mismatched selection error = %v, want ErrSelectionMismatch", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	selection = policySelection(snapshot)
-	_, err = (gyro.HealthyCandidate{}).Decide(canceled, gyro.RouteRequest{Key: "key"}, snapshot, selection, testHealthView{"a": gyro.Healthy})
+	_, err = (policy.HealthyCandidate{}).Decide(canceled, gyro.RouteRequest{Key: "key"}, snapshot, selection, testHealthView{"a": gyro.Healthy})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled request error = %v, want context.Canceled", err)
 	}

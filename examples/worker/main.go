@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/resource"
+	"github.com/focusandinsist/gyro/internal/selector"
 )
 
 type workerResource struct{ id string }
@@ -19,7 +21,7 @@ func (workerFactory) Create(_ context.Context, member gyro.Member) (gyro.Resourc
 }
 
 func main() {
-	selector := gyro.NewRendezvousSelector("worker-demo-v1")
+	selector := selector.NewRendezvousSelector("worker-demo-v1")
 	snapshot := gyro.TopologySnapshot{
 		Revision: gyro.Revision{Source: "workers", Generation: 1, Token: "1"},
 		Members: []gyro.Member{
@@ -31,7 +33,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	pool, err := gyro.NewResourcePool(workerFactory{})
+	pool, err := resource.NewResourcePool(workerFactory{})
 	if err != nil {
 		panic(err)
 	}

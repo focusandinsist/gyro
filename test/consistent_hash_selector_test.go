@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/selector"
 )
 
 func selectorSnapshot(ids ...string) gyro.TopologySnapshot {
@@ -22,11 +23,11 @@ func selectorSnapshot(ids ...string) gyro.TopologySnapshot {
 
 func TestConsistentHashSelectorIsDeterministicAndOrderIndependent(t *testing.T) {
 	config := gyro.DefaultLocatorConfig()
-	first, err := gyro.NewConsistentHashSelector(config)
+	first, err := selector.NewConsistentHashSelector(config)
 	if err != nil {
 		t.Fatalf("NewConsistentHashSelector failed: %v", err)
 	}
-	second, err := gyro.NewConsistentHashSelector(config)
+	second, err := selector.NewConsistentHashSelector(config)
 	if err != nil {
 		t.Fatalf("second selector failed: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestConsistentHashSelectorIsDeterministicAndOrderIndependent(t *testing.T) 
 }
 
 func TestConsistentHashSelectorValidatesInputAndPropagatesCancellation(t *testing.T) {
-	selector, err := gyro.NewConsistentHashSelector(gyro.DefaultLocatorConfig())
+	selector, err := selector.NewConsistentHashSelector(gyro.DefaultLocatorConfig())
 	if err != nil {
 		t.Fatalf("NewConsistentHashSelector failed: %v", err)
 	}

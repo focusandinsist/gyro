@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/policy"
 )
 
 // Runtime owns the shared lifecycle of a routed adapter: locator construction,
@@ -22,7 +23,7 @@ type Runtime struct {
 
 // New builds a routed runtime from protocol-specific node creation logic.
 func New(addresses []string, locatorConfig gyro.LocatorConfig, healthConfig gyro.HealthCheckerConfig, idPrefix string, create func(gyro.NodeInfo) (gyro.Node, error), checker gyro.HealthChecker) (*Runtime, error) {
-	return NewWithPolicy(addresses, locatorConfig, healthConfig, idPrefix, create, checker, gyro.PrimaryOnly{})
+	return NewWithPolicy(addresses, locatorConfig, healthConfig, idPrefix, create, checker, policy.PrimaryOnly{})
 }
 
 // NewWithPolicy makes adapter failover semantics explicit at construction.

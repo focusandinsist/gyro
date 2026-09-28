@@ -93,11 +93,11 @@ gRPC 用法结构上完全对称,把 `redisadapter` 换成 `github.com/focusandi
 
 ```
 repository/
-├── gyro/                  # 核心 API 和实现: Locator、Client、HealthChecker、ConfigManager
+├── gyro/                  # 稳定的领域模型、公共接口和错误
 ├── adapters/              # 外部技术适配器
 │   ├── redis/             # Redis 用户入口和适配器(go-redis)
 │   └── grpc/              # gRPC 用户入口和适配器(grpc-go)
-├── internal/routed/       # 适配器共享的内部生命周期实现
+├── internal/              # 按 topology/selector/health/policy/resource/client 拆分的实现
 └── docs/                  # 详细文档
 ```
 

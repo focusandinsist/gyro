@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/policy"
+	"github.com/focusandinsist/gyro/internal/resource"
+	"github.com/focusandinsist/gyro/internal/selector"
 )
 
 type workerResource struct {
@@ -45,13 +48,13 @@ func workerSnapshot(source string, generation uint64, ids ...string) gyro.Topolo
 
 func TestWorkerRoutingEndToEndUsesTopologySelectorPolicyAndResources(t *testing.T) {
 	ctx := context.Background()
-	selector := gyro.NewRendezvousSelector("worker-v1")
+	sel := selector.NewRendezvousSelector("worker-v1")
 	snapshot := workerSnapshot("workers", 1, "worker-a", "worker-b", "worker-c")
-	other, err := selector.Select(ctx, gyro.RouteRequest{Key: "task-42"}, snapshot)
+	other, err := sel.Select(ctx, gyro.RouteRequest{Key: "task-42"}, snapshot)
 	if err != nil {
 		t.Fatalf("first selector failed: %v", err)
 	}
-	second, err := gyro.NewRendezvousSelector("worker-v1").Select(ctx, gyro.RouteRequest{Key: "task-42"}, snapshot)
+	second, err := selector.NewRendezvousSelector("worker-v1").Select(ctx, gyro.RouteRequest{Key: "task-42"}, snapshot)
 	if err != nil {
 		t.Fatalf("second selector failed: %v", err)
 	}
@@ -60,7 +63,7 @@ func TestWorkerRoutingEndToEndUsesTopologySelectorPolicyAndResources(t *testing.
 	}
 
 	factory := &workerFactory{}
-	resources, err := gyro.NewResourcePool(factory)
+	resources, err := resource.NewResourcePool(factory)
 	if err != nil {
 		t.Fatalf("resource pool failed: %v", err)
 	}
@@ -87,10 +90,10 @@ func TestWorkerRoutingEndToEndUsesTopologySelectorPolicyAndResources(t *testing.
 	}
 
 	selection := gyro.CandidateSet{Revision: snapshot.Revision, Candidates: []gyro.Candidate{{MemberID: "worker-a"}, {MemberID: "worker-b"}}}
-	if _, err := (gyro.PrimaryOnly{}).Decide(ctx, gyro.RouteRequest{Key: "task-42"}, snapshot, selection, workerHealth{"worker-a": gyro.Unhealthy, "worker-b": gyro.Healthy}); !errors.Is(err, gyro.ErrFailoverNotAllowed) {
+	if _, err := (policy.PrimaryOnly{}).Decide(ctx, gyro.RouteRequest{Key: "task-42"}, snapshot, selection, workerHealth{"worker-a": gyro.Unhealthy, "worker-b": gyro.Healthy}); !errors.Is(err, gyro.ErrFailoverNotAllowed) {
 		t.Fatalf("PrimaryOnly error = %v, want ErrFailoverNotAllowed", err)
 	}
-	decision, err := (gyro.HealthyCandidate{}).Decide(ctx, gyro.RouteRequest{Key: "task-42"}, snapshot, selection, workerHealth{"worker-a": gyro.Unhealthy, "worker-b": gyro.Healthy})
+	decision, err := (policy.HealthyCandidate{}).Decide(ctx, gyro.RouteRequest{Key: "task-42"}, snapshot, selection, workerHealth{"worker-a": gyro.Unhealthy, "worker-b": gyro.Healthy})
 	if err != nil || decision.Primary.ID != "worker-b" {
 		t.Fatalf("HealthyCandidate decision = %#v, error=%v", decision, err)
 	}
@@ -105,7 +108,7 @@ func TestWorkerRoutingEndToEndUsesTopologySelectorPolicyAndResources(t *testing.
 }
 
 func TestWorkerMembershipChangeMigratesOnlyPartOfKeys(t *testing.T) {
-	selector := gyro.NewRendezvousSelector("worker-v1")
+	selector := selector.NewRendezvousSelector("worker-v1")
 	before := workerSnapshot("workers", 1, "a", "b", "c")
 	after := workerSnapshot("workers", 2, "a", "b", "c", "d")
 	unchanged, changed := 0, 0

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+
 	"time"
 )
 
@@ -172,7 +173,7 @@ func TestHealthAwarePoolSmallClusterFailover(t *testing.T) {
 			}
 
 			checker := &controllableHealthChecker{config: DefaultHealthCheckerConfig()}
-			pool := NewHealthAwarePoolWithCheckerAndPolicy(locator, checker, HealthyCandidate{AllowUnknown: true})
+			pool := NewHealthAwarePoolWithCheckerAndPolicy(locator, checker, testHealthyCandidatePolicy{})
 			pool.StartHealthMonitoring(context.Background())
 			defer pool.Close()
 
@@ -198,6 +199,28 @@ func TestHealthAwarePoolSmallClusterFailover(t *testing.T) {
 			}
 		})
 	}
+}
+
+type testHealthyCandidatePolicy struct{}
+
+func (testHealthyCandidatePolicy) Decide(ctx context.Context, _ RouteRequest, snapshot TopologySnapshot, selection CandidateSet, health HealthView) (RouteDecision, error) {
+	if ctx == nil {
+		return RouteDecision{}, ErrNilContext
+	}
+	if err := ctx.Err(); err != nil {
+		return RouteDecision{}, err
+	}
+	for _, candidate := range selection.Candidates {
+		if health.Status(candidate.MemberID) != Healthy && health.Status(candidate.MemberID) != Unknown {
+			continue
+		}
+		for _, member := range snapshot.Members {
+			if member.ID == candidate.MemberID {
+				return RouteDecision{Primary: member, Revision: snapshot.Revision}, nil
+			}
+		}
+	}
+	return RouteDecision{}, ErrNoEligibleCandidate
 }
 
 func TestHealthAwarePoolRemoveNodeClearsHealthSnapshot(t *testing.T) {

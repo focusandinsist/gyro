@@ -5,10 +5,11 @@ import (
 	"fmt"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/selector"
 )
 
 func main() {
-	selector := gyro.NewRendezvousSelector("demo-v1")
+	selector := selector.NewRendezvousSelector("demo-v1")
 	snapshot := gyro.TopologySnapshot{
 		Revision: gyro.Revision{Source: "demo", Generation: 1, Token: "1"},
 		Members: []gyro.Member{

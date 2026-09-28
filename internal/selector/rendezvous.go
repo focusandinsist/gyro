@@ -1,4 +1,4 @@
-package gyro
+package selector
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/focusandinsist/gyro/gyro"
 )
 
 // RendezvousSelector ranks every member independently by a deterministic
@@ -14,7 +15,7 @@ type RendezvousSelector struct {
 	seed string
 }
 
-var _ Selector = (*RendezvousSelector)(nil)
+var _ gyro.Selector = (*RendezvousSelector)(nil)
 
 // NewRendezvousSelector creates a selector. Seed is part of the routing
 // configuration and must be kept equal by clients that need identical results.
@@ -22,32 +23,32 @@ func NewRendezvousSelector(seed string) *RendezvousSelector {
 	return &RendezvousSelector{seed: seed}
 }
 
-func (s *RendezvousSelector) Select(ctx context.Context, request RouteRequest, snapshot TopologySnapshot) (CandidateSet, error) {
+func (s *RendezvousSelector) Select(ctx context.Context, request gyro.RouteRequest, snapshot gyro.TopologySnapshot) (gyro.CandidateSet, error) {
 	if ctx == nil {
-		return CandidateSet{}, ErrNilContext
+		return gyro.CandidateSet{}, gyro.ErrNilContext
 	}
 	if err := ctx.Err(); err != nil {
-		return CandidateSet{}, err
+		return gyro.CandidateSet{}, err
 	}
 	if request.Key == "" {
-		return CandidateSet{}, ErrInvalidRequest
+		return gyro.CandidateSet{}, gyro.ErrInvalidRequest
 	}
-	normalized, err := normalizeTopologySnapshot(snapshot)
+	normalized, err := normalizeSnapshot(snapshot)
 	if err != nil {
-		return CandidateSet{}, err
+		return gyro.CandidateSet{}, err
 	}
 	if len(normalized.Members) == 0 {
-		return CandidateSet{}, ErrNoMembers
+		return gyro.CandidateSet{}, gyro.ErrNoMembers
 	}
 
 	type scoredMember struct {
-		member Member
+		member gyro.Member
 		score  uint64
 	}
 	scored := make([]scoredMember, 0, len(normalized.Members))
 	for _, member := range normalized.Members {
 		if err := ctx.Err(); err != nil {
-			return CandidateSet{}, err
+			return gyro.CandidateSet{}, err
 		}
 		scored = append(scored, scoredMember{
 			member: member,
@@ -60,11 +61,11 @@ func (s *RendezvousSelector) Select(ctx context.Context, request RouteRequest, s
 		}
 		return scored[i].member.ID < scored[j].member.ID
 	})
-	candidates := make([]Candidate, len(scored))
+	candidates := make([]gyro.Candidate, len(scored))
 	for i, item := range scored {
-		candidates[i] = Candidate{MemberID: item.member.ID}
+		candidates[i] = gyro.Candidate{MemberID: item.member.ID}
 	}
-	return CandidateSet{Revision: normalized.Revision, Candidates: candidates}, nil
+	return gyro.CandidateSet{Revision: normalized.Revision, Candidates: candidates}, nil
 }
 
 func rendezvousScore(seed, key, memberID string) uint64 {

@@ -1,36 +1,21 @@
-package gyro
+package resource
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/focusandinsist/gyro/gyro"
 )
 
 var (
-	ErrResourceUnavailable = errors.New("route resource unavailable")
-	ErrResourcePoolClosed  = errors.New("resource pool is closed")
+	ErrResourceUnavailable = gyro.ErrResourceUnavailable
+	ErrResourcePoolClosed  = gyro.ErrResourcePoolClosed
 )
 
-// Resource is an adapter-owned resource managed by ResourcePool.
-type Resource interface {
-	MemberID() string
-	Close() error
-}
-
-// ResourceFactory creates a resource for one topology member.
-type ResourceFactory interface {
-	Create(context.Context, Member) (Resource, error)
-}
-
-// ResourceHandle keeps a resource alive until Release is called.
-type ResourceHandle interface {
-	Resource() Resource
-	Release() error
-}
-
 type resourceEntry struct {
-	resource    Resource
+	resource    gyro.Resource
 	fingerprint string
 	refs        int
 	pending     bool
@@ -44,32 +29,31 @@ type resourceHandle struct {
 	err   error
 }
 
-// ResourcePool owns resources and delays replacement closure until all leases
-// against the old entry have been released.
 type ResourcePool struct {
 	mu      sync.Mutex
-	factory ResourceFactory
+	factory gyro.ResourceFactory
 	active  map[string]*resourceEntry
 	closed  bool
 }
 
-func NewResourcePool(factory ResourceFactory) (*ResourcePool, error) {
+func NewResourcePool(factory gyro.ResourceFactory) (*ResourcePool, error) {
 	if factory == nil {
 		return nil, fmt.Errorf("resource factory cannot be nil")
 	}
 	return &ResourcePool{factory: factory, active: make(map[string]*resourceEntry)}, nil
 }
 
-// Replace prepares all changed resources before publishing the new member
-// set. Existing entries with the same member fingerprint are reused.
-func (p *ResourcePool) Replace(ctx context.Context, members []Member) error {
+func (p *ResourcePool) Replace(ctx context.Context, members []gyro.Member) error {
 	if ctx == nil {
-		return ErrNilContext
+		return gyro.ErrNilContext
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	normalized, err := normalizeTopologySnapshot(TopologySnapshot{Revision: Revision{Source: "resource", Generation: 1, Token: "replace"}, Members: members})
+	normalized, err := normalizeSnapshot(gyro.TopologySnapshot{
+		Revision: gyro.Revision{Source: "resource", Generation: 1, Token: "replace"},
+		Members:  members,
+	})
 	if err != nil {
 		return err
 	}
@@ -94,18 +78,14 @@ func (p *ResourcePool) Replace(ctx context.Context, members []Member) error {
 		}
 		resource, createErr := p.factory.Create(ctx, member)
 		if createErr != nil {
-			for _, entry := range created {
-				_ = entry.resource.Close()
-			}
+			closeCreated(created)
 			return fmt.Errorf("%w: create member %s: %v", ErrResourceUnavailable, member.ID, createErr)
 		}
 		if resource == nil || resource.MemberID() != member.ID {
 			if resource != nil {
 				_ = resource.Close()
 			}
-			for _, entry := range created {
-				_ = entry.resource.Close()
-			}
+			closeCreated(created)
 			return fmt.Errorf("%w: factory returned invalid resource for member %s", ErrResourceUnavailable, member.ID)
 		}
 		entry := &resourceEntry{resource: resource, fingerprint: memberFingerprint(member)}
@@ -113,30 +93,27 @@ func (p *ResourcePool) Replace(ctx context.Context, members []Member) error {
 		created = append(created, entry)
 	}
 	if err := ctx.Err(); err != nil {
-		for _, entry := range created {
-			_ = entry.resource.Close()
-		}
+		closeCreated(created)
 		return err
 	}
 
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		for _, entry := range created {
-			_ = entry.resource.Close()
-		}
+		closeCreated(created)
 		return ErrResourcePoolClosed
 	}
 	old := p.active
 	p.active = prepared
-	var closeNow []Resource
+	closeNow := make([]gyro.Resource, 0)
 	for memberID, entry := range old {
-		if prepared[memberID] != entry {
-			entry.pending = true
-			if entry.refs == 0 {
-				entry.closed = true
-				closeNow = append(closeNow, entry.resource)
-			}
+		if prepared[memberID] == entry {
+			continue
+		}
+		entry.pending = true
+		if entry.refs == 0 && !entry.closed {
+			entry.closed = true
+			closeNow = append(closeNow, entry.resource)
 		}
 	}
 	p.mu.Unlock()
@@ -146,9 +123,9 @@ func (p *ResourcePool) Replace(ctx context.Context, members []Member) error {
 	return nil
 }
 
-func (p *ResourcePool) Acquire(ctx context.Context, memberID string) (ResourceHandle, error) {
+func (p *ResourcePool) Acquire(ctx context.Context, memberID string) (gyro.ResourceHandle, error) {
 	if ctx == nil {
-		return nil, ErrNilContext
+		return nil, gyro.ErrNilContext
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -166,10 +143,10 @@ func (p *ResourcePool) Acquire(ctx context.Context, memberID string) (ResourceHa
 	return &resourceHandle{pool: p, entry: entry}, nil
 }
 
-func (h *resourceHandle) Resource() Resource { return h.entry.resource }
+func (h *resourceHandle) Resource() gyro.Resource { return h.entry.resource }
 
 func (h *resourceHandle) Release() error {
-	var resource Resource
+	var resource gyro.Resource
 	h.once.Do(func() {
 		h.pool.mu.Lock()
 		if h.entry.refs > 0 {
@@ -196,7 +173,7 @@ func (p *ResourcePool) Close() error {
 	p.closed = true
 	old := p.active
 	p.active = make(map[string]*resourceEntry)
-	var closeNow []Resource
+	closeNow := make([]gyro.Resource, 0)
 	for _, entry := range old {
 		entry.pending = true
 		if entry.refs == 0 && !entry.closed {
@@ -212,6 +189,27 @@ func (p *ResourcePool) Close() error {
 	return closeErr
 }
 
-func memberFingerprint(member Member) string {
-	return fmt.Sprintf("%#v", cloneMember(member))
+func closeCreated(entries []*resourceEntry) {
+	for _, entry := range entries {
+		_ = entry.resource.Close()
+	}
+}
+
+func memberFingerprint(member gyro.Member) string { return fmt.Sprintf("%#v", member) }
+
+func normalizeSnapshot(snapshot gyro.TopologySnapshot) (gyro.TopologySnapshot, error) {
+	if snapshot.Revision.Source == "" {
+		return gyro.TopologySnapshot{}, gyro.ErrInvalidSnapshot
+	}
+	seen := make(map[string]struct{}, len(snapshot.Members))
+	for _, member := range snapshot.Members {
+		if member.ID == "" {
+			return gyro.TopologySnapshot{}, gyro.ErrInvalidSnapshot
+		}
+		if _, exists := seen[member.ID]; exists {
+			return gyro.TopologySnapshot{}, gyro.ErrInvalidSnapshot
+		}
+		seen[member.ID] = struct{}{}
+	}
+	return snapshot, nil
 }

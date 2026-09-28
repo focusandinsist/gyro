@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/resource"
 )
 
 type fakeResource struct {
@@ -46,7 +47,7 @@ func resourceMember(id, address string) gyro.Member {
 
 func TestResourcePoolPreparesAtomicallyAndReusesUnchangedResources(t *testing.T) {
 	factory := &fakeResourceFactory{}
-	pool, err := gyro.NewResourcePool(factory)
+	pool, err := resource.NewResourcePool(factory)
 	if err != nil {
 		t.Fatalf("NewResourcePool failed: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestResourcePoolPreparesAtomicallyAndReusesUnchangedResources(t *testing.T)
 
 func TestResourcePoolCreateFailureDoesNotPublishPartialResources(t *testing.T) {
 	factory := &fakeResourceFactory{failID: "b"}
-	pool, err := gyro.NewResourcePool(factory)
+	pool, err := resource.NewResourcePool(factory)
 	if err != nil {
 		t.Fatalf("NewResourcePool failed: %v", err)
 	}

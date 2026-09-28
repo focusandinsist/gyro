@@ -39,7 +39,7 @@ func NewHealthAwarePool(locator Locator, config HealthCheckerConfig) *HealthAwar
 
 // NewHealthAwarePoolWithChecker creates a new health-aware locator with an injected health checker.
 func NewHealthAwarePoolWithChecker(locator Locator, healthChecker HealthChecker) *HealthAwarePool {
-	return NewHealthAwarePoolWithCheckerAndPolicy(locator, healthChecker, PrimaryOnly{})
+	return NewHealthAwarePoolWithCheckerAndPolicy(locator, healthChecker, primaryOnlyPolicy{})
 }
 
 // NewHealthAwarePoolWithCheckerAndPolicy creates a pool with an explicit
@@ -47,7 +47,7 @@ func NewHealthAwarePoolWithChecker(locator Locator, healthChecker HealthChecker)
 // policy only interprets the pure route candidates and health view.
 func NewHealthAwarePoolWithCheckerAndPolicy(locator Locator, healthChecker HealthChecker, policy FailurePolicy) *HealthAwarePool {
 	if policy == nil {
-		policy = PrimaryOnly{}
+		policy = primaryOnlyPolicy{}
 	}
 	hap := &HealthAwarePool{
 		healthChecker: healthChecker,
@@ -137,7 +137,7 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 	}
 	policy := hap.failurePolicy
 	if policy == nil {
-		policy = PrimaryOnly{}
+		policy = primaryOnlyPolicy{}
 	}
 	nodeByID := make(map[string]Node, len(nodes))
 	members := make([]Member, len(nodes))
@@ -478,4 +478,30 @@ func (hap *HealthAwarePool) Close() error {
 	})
 
 	return hap.closeErr
+}
+
+// primaryOnlyPolicy is the compatibility default used by the legacy pool
+// while policy implementations live in internal/policy. New adapters should
+// choose an explicit internal policy at construction time.
+type primaryOnlyPolicy struct{}
+
+func (primaryOnlyPolicy) Decide(ctx context.Context, _ RouteRequest, snapshot TopologySnapshot, selection CandidateSet, health HealthView) (RouteDecision, error) {
+	if ctx == nil {
+		return RouteDecision{}, ErrNilContext
+	}
+	if err := ctx.Err(); err != nil {
+		return RouteDecision{}, err
+	}
+	if selection.Revision != snapshot.Revision || len(selection.Candidates) == 0 {
+		return RouteDecision{}, ErrSelectionMismatch
+	}
+	if health == nil || health.Status(selection.Candidates[0].MemberID) != Healthy {
+		return RouteDecision{}, ErrFailoverNotAllowed
+	}
+	for _, member := range snapshot.Members {
+		if member.ID == selection.Candidates[0].MemberID {
+			return RouteDecision{Primary: cloneMember(member), Revision: snapshot.Revision, Policy: "primary-only", Reason: "primary candidate is healthy"}, nil
+		}
+	}
+	return RouteDecision{}, ErrSelectionMismatch
 }
