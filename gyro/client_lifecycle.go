@@ -32,7 +32,7 @@ func (c *Client) Start(ctx context.Context) error {
 
 	runCtx, runCancel := context.WithCancel(ctx)
 	c.stateMu.Lock()
-	run = &clientRun{ctx: runCtx, cancel: runCancel, pool: c.state.prepared}
+	run = &clientRun{ctx: runCtx, cancel: runCancel, pool: c.state.prepared, done: make(chan struct{})}
 	c.state.prepared = nil
 	c.state.run = run
 	registerConfigWatcher := !c.state.configWatcher
@@ -51,7 +51,6 @@ func (c *Client) Start(ctx context.Context) error {
 // Stop stops the client.
 func (c *Client) Stop() error {
 	c.lifecycleMu.Lock()
-	defer c.lifecycleMu.Unlock()
 	c.stateMu.Lock()
 	run := c.state.run
 	prepared := c.state.prepared
@@ -59,9 +58,13 @@ func (c *Client) Stop() error {
 	c.state.prepared = nil
 	c.state.nodeInfos = nil
 	c.stateMu.Unlock()
+	c.lifecycleMu.Unlock()
 	if run != nil {
 		if run.cancel != nil {
 			run.cancel()
+		}
+		if run.done != nil {
+			<-run.done
 		}
 		return run.pool.Close()
 	}

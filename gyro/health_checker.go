@@ -46,7 +46,7 @@ type healthCheckRun struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
-	queue  chan Node
+	queue  chan healthProbe
 }
 
 // NewDefaultHealthChecker creates a checker with no registered nodes or active
@@ -67,10 +67,21 @@ func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
 	nodeID := node.ID()
 	hc.mu.Lock()
 	generation := hc.nodeGenerations[nodeID]
+	hc.mu.Unlock()
+	return hc.checkWithGeneration(ctx, node, generation)
+}
+
+func (hc *DefaultHealthChecker) checkWithGeneration(ctx context.Context, node Node, generation uint64) error {
+	nodeID := node.ID()
+	hc.mu.Lock()
+	if hc.nodeGenerations[nodeID] != generation {
+		hc.mu.Unlock()
+		return nil
+	}
 	config := hc.config
 	stats, exists := hc.nodeStats[nodeID]
 	if !exists {
-		stats = &NodeHealthStats{IsHealthy: true} // optimistic until proven otherwise
+		stats = &NodeHealthStats{IsHealthy: true}
 		hc.nodeStats[nodeID] = stats
 	}
 
@@ -161,11 +172,7 @@ func (hc *DefaultHealthChecker) AddNode(node Node) {
 	hc.nodes[nodeID] = node
 	hc.nodeGenerations[nodeID]++
 
-	if _, exists := hc.nodeStats[nodeID]; !exists {
-		hc.nodeStats[nodeID] = &NodeHealthStats{
-			IsHealthy: true,
-		}
-	}
+	hc.nodeStats[nodeID] = &NodeHealthStats{IsHealthy: true}
 }
 
 // RemoveNode removes a node from monitoring.
@@ -323,7 +330,7 @@ func (hc *DefaultHealthChecker) GetNodeStats(nodeID string) *NodeHealthStats {
 func (hc *DefaultHealthChecker) startRun(interval time.Duration) {
 	ctx, cancel := context.WithCancel(hc.parentCtx)
 	run := &healthCheckRun{
-		ctx: ctx, cancel: cancel, done: make(chan struct{}), queue: make(chan Node, 100),
+		ctx: ctx, cancel: cancel, done: make(chan struct{}), queue: make(chan healthProbe, 100),
 	}
 	hc.run = run
 	var workers sync.WaitGroup
@@ -335,12 +342,12 @@ func (hc *DefaultHealthChecker) startRun(interval time.Duration) {
 				select {
 				case <-run.ctx.Done():
 					return
-				case node := <-run.queue:
+				case probe := <-run.queue:
 					if run.ctx.Err() != nil {
 						return
 					}
-					if node != nil {
-						hc.Check(run.ctx, node)
+					if probe.node != nil {
+						hc.checkWithGeneration(run.ctx, probe.node, probe.generation)
 					}
 				}
 			}
@@ -377,17 +384,17 @@ func (hc *DefaultHealthChecker) monitoringLoop(run *healthCheckRun, interval tim
 			return
 		case <-ticker.C:
 			hc.mu.RLock()
-			nodes := make([]Node, 0, len(hc.nodes))
-			for _, node := range hc.nodes {
-				nodes = append(nodes, node)
+			probes := make([]healthProbe, 0, len(hc.nodes))
+			for nodeID, node := range hc.nodes {
+				probes = append(probes, healthProbe{node: node, generation: hc.nodeGenerations[nodeID]})
 			}
 			hc.mu.RUnlock()
 
-			for _, node := range nodes {
+			for _, probe := range probes {
 				select {
 				case <-run.ctx.Done():
 					return
-				case run.queue <- node:
+				case run.queue <- probe:
 				default:
 					// Worker pool is saturated; drop this node's check rather
 					// than block the ticker loop until the next cycle.

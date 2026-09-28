@@ -75,36 +75,3 @@ func (c *Client) GetStats() HealthAwarePoolStats {
 		UnhealthyNodes: totalNodes - healthyCount,
 	}
 }
-
-// nativeClientProvider is implemented by protocol adapter nodes that can hand
-// back their underlying native client.
-type nativeClientProvider interface {
-	GetNativeClient() any
-}
-
-// GetClientForKey returns the native protocol client for the node that owns
-// the given key. If the node does not expose a native client, the Node itself
-// is returned instead.
-func (c *Client) GetClientForKey(ctx context.Context, key string) (any, error) {
-	locator := c.getLocator()
-	if locator == nil {
-		return nil, fmt.Errorf("client not started")
-	}
-
-	node, err := locator.Get(ctx, key)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get node for key %s: %w", key, err)
-	}
-
-	provider, ok := node.(nativeClientProvider)
-	if !ok {
-		return node, nil
-	}
-
-	native := provider.GetNativeClient()
-	if native == nil {
-		return nil, fmt.Errorf("node %s has no healthy native client", node.ID())
-	}
-
-	return native, nil
-}

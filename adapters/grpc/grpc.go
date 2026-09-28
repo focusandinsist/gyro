@@ -272,7 +272,7 @@ func newClient(addresses []string, config *ClientConfig, factory *NodeFactory, h
 	if factory == nil {
 		factory = &NodeFactory{config: config, newConnection: NewConnection}
 	}
-	runtime, err := routed.New(addresses, config.Locator, config.HealthChecker, "grpc", factory.CreateNode, healthChecker)
+	runtime, err := routed.NewWithPolicy(addresses, config.Locator, config.HealthChecker, "grpc", factory.CreateNode, healthChecker, gyro.HealthyCandidate{AllowUnknown: true})
 	if err != nil {
 		return nil, err
 	}
@@ -298,6 +298,19 @@ func (gc *Client) GetClientForKey(ctx context.Context, key string) (any, error) 
 	}
 
 	return nativeClient, nil
+}
+
+// GetGRPCConnForKey returns the typed gRPC resource for a routed key.
+func (gc *Client) GetGRPCConnForKey(ctx context.Context, key string) (*grpc.ClientConn, error) {
+	value, err := gc.GetClientForKey(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	conn, ok := value.(*grpc.ClientConn)
+	if !ok || conn == nil {
+		return nil, fmt.Errorf("routed resource is not a gRPC connection")
+	}
+	return conn, nil
 }
 
 // GetNodeForKey returns the routed node metadata for observability and tests.

@@ -146,12 +146,18 @@ func (hap *HealthAwarePool) Get(ctx context.Context, key string) (Node, error) {
 		members[i] = Member{ID: node.ID(), Endpoints: []Endpoint{{Address: node.Address()}}}
 	}
 	sort.Slice(members, func(i, j int) bool { return members[i].ID < members[j].ID })
+	primary, err := locator.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
 	selectionNodes, err := locator.GetReplicas(ctx, key, len(nodes))
 	if err != nil {
 		return nil, err
 	}
-	selection := CandidateSet{Revision: routeRevision(members), Candidates: make([]Candidate, 0, len(selectionNodes))}
+	selection := CandidateSet{Revision: routeRevision(members), Candidates: make([]Candidate, 0, len(selectionNodes)+1)}
 	seen := make(map[string]struct{}, len(selectionNodes))
+	selection.Candidates = append(selection.Candidates, Candidate{MemberID: primary.ID()})
+	seen[primary.ID()] = struct{}{}
 	for _, candidate := range selectionNodes {
 		if _, exists := seen[candidate.ID()]; !exists {
 			selection.Candidates = append(selection.Candidates, Candidate{MemberID: candidate.ID()})
@@ -201,6 +207,17 @@ func (hap *HealthAwarePool) StartHealthMonitoring(ctx context.Context) {
 		if hap.closed {
 			hap.mu.Unlock()
 			return
+		}
+		if _, exists := hap.currentSnapshot().healthyNodes[nodeID]; !exists {
+			hap.mu.Unlock()
+			return
+		}
+		if checker, ok := hap.healthChecker.(HealthView); ok {
+			status := checker.Status(nodeID)
+			if status == Unknown || (healthy && status != Healthy) || (!healthy && status != Unhealthy) {
+				hap.mu.Unlock()
+				return
+			}
 		}
 		snapshot := hap.currentSnapshot()
 		nodes := cloneHealthNodes(snapshot.healthyNodes)

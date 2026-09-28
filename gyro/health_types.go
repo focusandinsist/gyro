@@ -95,6 +95,11 @@ type NodeHealthStats struct {
 // HealthListener receives a node health transition after its threshold is met.
 type HealthListener func(nodeID string, healthy bool)
 
+type healthProbe struct {
+	node       Node
+	generation uint64
+}
+
 // HealthAwarePoolStats contains statistics about a health-aware pool
 type HealthAwarePoolStats struct {
 	TotalNodes     int `json:"total_nodes"`

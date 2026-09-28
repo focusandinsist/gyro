@@ -180,6 +180,7 @@ func nodeInfosFromTopologySnapshot(snapshot TopologySnapshot) ([]NodeInfo, error
 
 // watchServiceNodes watches for service node changes with retry mechanism.
 func (c *Client) watchServiceNodes(run *clientRun) {
+	defer close(run.done)
 	ctx := run.ctx
 	const (
 		maxRetries = 10

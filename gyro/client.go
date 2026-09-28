@@ -37,6 +37,7 @@ type clientRun struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	pool   *HealthAwarePool
+	done   chan struct{}
 }
 
 // clientState contains mutable runtime data protected by Client.stateMu.

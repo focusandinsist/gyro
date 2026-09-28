@@ -181,7 +181,7 @@ func newClient(addresses []string, config *ClientConfig, factory *NodeFactory, h
 	if factory == nil {
 		factory = &NodeFactory{config: config, newConnection: NewConnection}
 	}
-	runtime, err := routed.New(addresses, config.Locator, config.HealthChecker, "redis", factory.CreateNode, healthChecker)
+	runtime, err := routed.NewWithPolicy(addresses, config.Locator, config.HealthChecker, "redis", factory.CreateNode, healthChecker, gyro.HealthyCandidate{AllowUnknown: true})
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +205,19 @@ func (rc *Client) GetClientForKey(ctx context.Context, key string) (any, error) 
 	}
 
 	return nativeClient, nil
+}
+
+// GetRedisClientForKey returns the typed Redis resource for a routed key.
+func (rc *Client) GetRedisClientForKey(ctx context.Context, key string) (*goredis.Client, error) {
+	value, err := rc.GetClientForKey(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	client, ok := value.(*goredis.Client)
+	if !ok || client == nil {
+		return nil, fmt.Errorf("routed resource is not a redis client")
+	}
+	return client, nil
 }
 
 // GetNodeForKey returns the routed node metadata for observability and tests.

@@ -22,6 +22,11 @@ type Runtime struct {
 
 // New builds a routed runtime from protocol-specific node creation logic.
 func New(addresses []string, locatorConfig gyro.LocatorConfig, healthConfig gyro.HealthCheckerConfig, idPrefix string, create func(gyro.NodeInfo) (gyro.Node, error), checker gyro.HealthChecker) (*Runtime, error) {
+	return NewWithPolicy(addresses, locatorConfig, healthConfig, idPrefix, create, checker, gyro.PrimaryOnly{})
+}
+
+// NewWithPolicy makes adapter failover semantics explicit at construction.
+func NewWithPolicy(addresses []string, locatorConfig gyro.LocatorConfig, healthConfig gyro.HealthCheckerConfig, idPrefix string, create func(gyro.NodeInfo) (gyro.Node, error), checker gyro.HealthChecker, policy gyro.FailurePolicy) (*Runtime, error) {
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("at least one %s address is required", idPrefix)
 	}
@@ -47,7 +52,7 @@ func New(addresses []string, locatorConfig gyro.LocatorConfig, healthConfig gyro
 	if checker == nil {
 		checker = gyro.NewDefaultHealthChecker(healthConfig)
 	}
-	pool := gyro.NewHealthAwarePoolWithCheckerAndPolicy(base, checker, gyro.HealthyCandidate{AllowUnknown: true})
+	pool := gyro.NewHealthAwarePoolWithCheckerAndPolicy(base, checker, policy)
 	healthCtx, cancel := context.WithCancel(context.Background())
 	pool.StartHealthMonitoring(healthCtx)
 	return &Runtime{locator: pool, pool: pool, cancel: cancel}, nil
