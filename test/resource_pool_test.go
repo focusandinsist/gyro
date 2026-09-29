@@ -75,8 +75,8 @@ func TestResourcePoolPreparesAtomicallyAndReusesUnchangedResources(t *testing.T)
 	if err := pool.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
 	}
-	if _, err := pool.Acquire(ctx, "a"); !errors.Is(err, gyro.ErrResourcePoolClosed) {
-		t.Fatalf("Acquire after Close error = %v, want ErrResourcePoolClosed", err)
+	if _, err := pool.Acquire(ctx, "a"); !errors.Is(err, resource.ErrPoolClosed) {
+		t.Fatalf("Acquire after Close error = %v, want ErrPoolClosed", err)
 	}
 }
 

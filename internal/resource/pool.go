@@ -9,10 +9,7 @@ import (
 	"github.com/focusandinsist/gyro/gyro"
 )
 
-var (
-	ErrResourceUnavailable = gyro.ErrResourceUnavailable
-	ErrResourcePoolClosed  = gyro.ErrResourcePoolClosed
-)
+var ErrPoolClosed = errors.New("resource pool is closed")
 
 type resourceEntry struct {
 	resource    gyro.Resource
@@ -56,7 +53,7 @@ func (p *ResourcePool) Add(resource gyro.Resource) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
-		return ErrResourcePoolClosed
+		return ErrPoolClosed
 	}
 	if _, exists := p.active[resource.MemberID()]; exists {
 		return fmt.Errorf("resource %s already exists", resource.MemberID())
@@ -69,12 +66,12 @@ func (p *ResourcePool) Remove(memberID string) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		return ErrResourcePoolClosed
+		return ErrPoolClosed
 	}
 	entry := p.active[memberID]
 	if entry == nil {
 		p.mu.Unlock()
-		return ErrResourceUnavailable
+		return gyro.ErrResourceUnavailable
 	}
 	delete(p.active, memberID)
 	entry.pending = true
@@ -109,7 +106,7 @@ func (p *ResourcePool) Replace(ctx context.Context, members []gyro.Member) error
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		return ErrResourcePoolClosed
+		return ErrPoolClosed
 	}
 	for _, member := range normalized.Members {
 		fingerprint := memberFingerprint(member)
@@ -127,14 +124,14 @@ func (p *ResourcePool) Replace(ctx context.Context, members []gyro.Member) error
 		resource, createErr := p.factory.Create(ctx, member)
 		if createErr != nil {
 			closeCreated(created)
-			return fmt.Errorf("%w: create member %s: %v", ErrResourceUnavailable, member.ID, createErr)
+			return fmt.Errorf("%w: create member %s: %v", gyro.ErrResourceUnavailable, member.ID, createErr)
 		}
 		if resource == nil || resource.MemberID() != member.ID {
 			if resource != nil {
 				_ = resource.Close()
 			}
 			closeCreated(created)
-			return fmt.Errorf("%w: factory returned invalid resource for member %s", ErrResourceUnavailable, member.ID)
+			return fmt.Errorf("%w: factory returned invalid resource for member %s", gyro.ErrResourceUnavailable, member.ID)
 		}
 		entry := &resourceEntry{resource: resource, fingerprint: memberFingerprint(member)}
 		prepared[member.ID] = entry
@@ -149,7 +146,7 @@ func (p *ResourcePool) Replace(ctx context.Context, members []gyro.Member) error
 	if p.closed {
 		p.mu.Unlock()
 		closeCreated(created)
-		return ErrResourcePoolClosed
+		return ErrPoolClosed
 	}
 	old := p.active
 	p.active = prepared
@@ -181,11 +178,11 @@ func (p *ResourcePool) Acquire(ctx context.Context, memberID string) (gyro.Resou
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
-		return nil, ErrResourcePoolClosed
+		return nil, ErrPoolClosed
 	}
 	entry := p.active[memberID]
 	if entry == nil || entry.pending || entry.closed {
-		return nil, ErrResourceUnavailable
+		return nil, gyro.ErrResourceUnavailable
 	}
 	entry.refs++
 	return &resourceHandle{pool: p, entry: entry}, nil

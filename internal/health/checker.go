@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/focusandinsist/gyro/gyro"
 )
 
 // DefaultHealthChecker periodically probes registered nodes and publishes
@@ -19,16 +21,16 @@ type DefaultHealthChecker struct {
 // by checkerState.mu.
 type checkerState struct {
 	mu              sync.RWMutex
-	config          HealthCheckerConfig
-	nodes           map[string]Node
+	config          gyro.HealthCheckerConfig
+	nodes           map[string]gyro.Node
 	nodeGenerations map[string]uint64
-	nodeStats       map[string]*NodeHealthStats
+	nodeStats       map[string]*gyro.NodeHealthStats
 }
 
 // checkerBroadcaster serializes asynchronous listener notifications so health
 // transitions are observed in publication order.
 type checkerBroadcaster struct {
-	healthListeners  []HealthListener
+	healthListeners  []gyro.HealthListener
 	notificationTail chan struct{}
 }
 
@@ -49,21 +51,26 @@ type healthCheckRun struct {
 	queue  chan healthProbe
 }
 
+type healthProbe struct {
+	node       gyro.Node
+	generation uint64
+}
+
 // NewDefaultHealthChecker creates a checker with no registered nodes or active
 // monitoring generation.
-func NewDefaultHealthChecker(config HealthCheckerConfig) *DefaultHealthChecker {
+func NewDefaultHealthChecker(config gyro.HealthCheckerConfig) *DefaultHealthChecker {
 	return &DefaultHealthChecker{
 		checkerState: checkerState{
-			config: config, nodes: make(map[string]Node),
-			nodeGenerations: make(map[string]uint64), nodeStats: make(map[string]*NodeHealthStats),
+			config: config, nodes: make(map[string]gyro.Node),
+			nodeGenerations: make(map[string]uint64), nodeStats: make(map[string]*gyro.NodeHealthStats),
 		},
-		checkerBroadcaster: checkerBroadcaster{healthListeners: make([]HealthListener, 0)},
+		checkerBroadcaster: checkerBroadcaster{healthListeners: make([]gyro.HealthListener, 0)},
 		maxWorkers:         10,
 	}
 }
 
 // Check performs a health check on the given node.
-func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
+func (hc *DefaultHealthChecker) Check(ctx context.Context, node gyro.Node) error {
 	nodeID := node.ID()
 	hc.mu.Lock()
 	generation := hc.nodeGenerations[nodeID]
@@ -71,7 +78,7 @@ func (hc *DefaultHealthChecker) Check(ctx context.Context, node Node) error {
 	return hc.checkWithGeneration(ctx, node, generation)
 }
 
-func (hc *DefaultHealthChecker) checkWithGeneration(ctx context.Context, node Node, generation uint64) error {
+func (hc *DefaultHealthChecker) checkWithGeneration(ctx context.Context, node gyro.Node, generation uint64) error {
 	nodeID := node.ID()
 	hc.mu.Lock()
 	if hc.nodeGenerations[nodeID] != generation {
@@ -81,7 +88,7 @@ func (hc *DefaultHealthChecker) checkWithGeneration(ctx context.Context, node No
 	config := hc.config
 	stats, exists := hc.nodeStats[nodeID]
 	if !exists {
-		stats = &NodeHealthStats{IsHealthy: true}
+		stats = &gyro.NodeHealthStats{IsHealthy: true}
 		hc.nodeStats[nodeID] = stats
 	}
 
@@ -103,7 +110,7 @@ func (hc *DefaultHealthChecker) checkWithGeneration(ctx context.Context, node No
 		return nil
 	}
 	stats.LastCheckTime = time.Now()
-	var listeners []HealthListener
+	var listeners []gyro.HealthListener
 	var previousNotification <-chan struct{}
 	var notificationDone chan struct{}
 	notify := false
@@ -164,7 +171,7 @@ func (hc *DefaultHealthChecker) LastCheckTime() time.Time {
 }
 
 // AddNode adds a node to be monitored.
-func (hc *DefaultHealthChecker) AddNode(node Node) {
+func (hc *DefaultHealthChecker) AddNode(node gyro.Node) {
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
 
@@ -172,7 +179,7 @@ func (hc *DefaultHealthChecker) AddNode(node Node) {
 	hc.nodes[nodeID] = node
 	hc.nodeGenerations[nodeID]++
 
-	hc.nodeStats[nodeID] = &NodeHealthStats{IsHealthy: true}
+	hc.nodeStats[nodeID] = &gyro.NodeHealthStats{IsHealthy: true}
 }
 
 // RemoveNode removes a node from monitoring.
@@ -214,8 +221,8 @@ func (hc *DefaultHealthChecker) StopMonitoring() {
 }
 
 // UpdateConfig updates the health checker configuration dynamically.
-func (hc *DefaultHealthChecker) UpdateConfig(newConfig HealthCheckerConfig) error {
-	if err := ValidateHealthCheckerConfig(newConfig); err != nil {
+func (hc *DefaultHealthChecker) UpdateConfig(newConfig gyro.HealthCheckerConfig) error {
+	if err := gyro.ValidateHealthCheckerConfig(newConfig); err != nil {
 		return err
 	}
 
@@ -238,7 +245,7 @@ func (hc *DefaultHealthChecker) UpdateConfig(newConfig HealthCheckerConfig) erro
 }
 
 // GetConfig returns the current configuration.
-func (hc *DefaultHealthChecker) GetConfig() HealthCheckerConfig {
+func (hc *DefaultHealthChecker) GetConfig() gyro.HealthCheckerConfig {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
 	return hc.config
@@ -252,7 +259,7 @@ func (hc *DefaultHealthChecker) IsEnabled() bool {
 }
 
 // AddHealthListener adds a health status change listener.
-func (hc *DefaultHealthChecker) AddHealthListener(listener HealthListener) {
+func (hc *DefaultHealthChecker) AddHealthListener(listener gyro.HealthListener) {
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
 	hc.healthListeners = append(hc.healthListeners, listener)
@@ -274,39 +281,39 @@ func (hc *DefaultHealthChecker) IsNodeHealthy(nodeID string) bool {
 // Status returns the observed health state. A registered node remains Unknown
 // until its first completed probe; this is intentionally separate from the
 // legacy IsNodeHealthy optimistic boolean API.
-func (hc *DefaultHealthChecker) Status(nodeID string) HealthStatus {
+func (hc *DefaultHealthChecker) Status(nodeID string) gyro.HealthStatus {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
 	stats, exists := hc.nodeStats[nodeID]
 	if !exists || stats.LastCheckTime.IsZero() {
-		return Unknown
+		return gyro.Unknown
 	}
 	if stats.IsHealthy {
-		return Healthy
+		return gyro.Healthy
 	}
-	return Unhealthy
+	return gyro.Unhealthy
 }
 
 // Snapshot returns a detached health view for all registered or observed
 // nodes. The returned map is safe for callers to modify.
-func (hc *DefaultHealthChecker) Snapshot() map[string]HealthStatus {
+func (hc *DefaultHealthChecker) Snapshot() map[string]gyro.HealthStatus {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
-	result := make(map[string]HealthStatus, len(hc.nodeStats))
+	result := make(map[string]gyro.HealthStatus, len(hc.nodeStats))
 	for nodeID, stats := range hc.nodeStats {
 		if stats.LastCheckTime.IsZero() {
-			result[nodeID] = Unknown
+			result[nodeID] = gyro.Unknown
 		} else if stats.IsHealthy {
-			result[nodeID] = Healthy
+			result[nodeID] = gyro.Healthy
 		} else {
-			result[nodeID] = Unhealthy
+			result[nodeID] = gyro.Unhealthy
 		}
 	}
 	return result
 }
 
 // GetNodeStats returns health statistics for a node.
-func (hc *DefaultHealthChecker) GetNodeStats(nodeID string) *NodeHealthStats {
+func (hc *DefaultHealthChecker) GetNodeStats(nodeID string) *gyro.NodeHealthStats {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
 
@@ -315,7 +322,7 @@ func (hc *DefaultHealthChecker) GetNodeStats(nodeID string) *NodeHealthStats {
 		return nil
 	}
 
-	return &NodeHealthStats{
+	return &gyro.NodeHealthStats{
 		ConsecutiveFailures:  stats.ConsecutiveFailures,
 		ConsecutiveSuccesses: stats.ConsecutiveSuccesses,
 		LastCheckTime:        stats.LastCheckTime,

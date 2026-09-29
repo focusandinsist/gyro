@@ -14,4 +14,4 @@ func NewChecker(config Config) *Checker { return internalhealth.NewDefaultHealth
 
 func DefaultConfig() Config { return gyro.DefaultHealthCheckerConfig() }
 
-func ValidateConfig(config Config) error { return internalhealth.ValidateHealthCheckerConfig(config) }
+func ValidateConfig(config Config) error { return gyro.ValidateHealthCheckerConfig(config) }

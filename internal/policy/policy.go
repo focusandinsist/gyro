@@ -6,11 +6,6 @@ import (
 	"github.com/focusandinsist/gyro/gyro"
 )
 
-var (
-	ErrFailoverNotAllowed  = gyro.ErrFailoverNotAllowed
-	ErrNoEligibleCandidate = gyro.ErrNoEligibleCandidate
-)
-
 // FailurePolicy converts a selector result and health observations into one
 // pure routing decision. It never probes, retries, or owns resources.
 var _ gyro.FailurePolicy = PrimaryOnly{}
@@ -28,10 +23,10 @@ func (PrimaryOnly) Decide(ctx context.Context, request gyro.RouteRequest, snapsh
 		return gyro.RouteDecision{}, err
 	}
 	if len(selection.Candidates) == 0 {
-		return gyro.RouteDecision{}, ErrNoEligibleCandidate
+		return gyro.RouteDecision{}, gyro.ErrNoEligibleCandidate
 	}
 	if health == nil || health.Status(selection.Candidates[0].MemberID) != gyro.Healthy {
-		return gyro.RouteDecision{}, ErrFailoverNotAllowed
+		return gyro.RouteDecision{}, gyro.ErrFailoverNotAllowed
 	}
 	return decisionForCandidate(snapshot, selection, members, 0, "primary-only", "primary candidate is healthy"), nil
 }
@@ -53,7 +48,7 @@ func (policy HealthyCandidate) Decide(ctx context.Context, request gyro.RouteReq
 		return gyro.RouteDecision{}, err
 	}
 	if health == nil {
-		return gyro.RouteDecision{}, ErrNoEligibleCandidate
+		return gyro.RouteDecision{}, gyro.ErrNoEligibleCandidate
 	}
 	for index, candidate := range selection.Candidates {
 		status := health.Status(candidate.MemberID)
@@ -65,7 +60,7 @@ func (policy HealthyCandidate) Decide(ctx context.Context, request gyro.RouteReq
 			return decisionForCandidate(snapshot, selection, members, index, "healthy-candidate", reason), nil
 		}
 	}
-	return gyro.RouteDecision{}, ErrNoEligibleCandidate
+	return gyro.RouteDecision{}, gyro.ErrNoEligibleCandidate
 }
 
 func routeContextErr(ctx context.Context) error {

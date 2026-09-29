@@ -7,7 +7,6 @@ import (
 
 var (
 	ErrResourceUnavailable = errors.New("route resource unavailable")
-	ErrResourcePoolClosed  = errors.New("resource pool is closed")
 )
 
 // Resource is an adapter-owned resource managed by an internal resource pool.

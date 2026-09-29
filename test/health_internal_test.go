@@ -29,23 +29,23 @@ func TestInternalHealthCheckerPublishesThresholdedSnapshot(t *testing.T) {
 	node := &internalHealthNode{}
 	node.healthy.Store(true)
 	checker.AddNode(node)
-	if got := checker.Status(node.ID()); got != health.Unknown {
+	if got := checker.Status(node.ID()); got != gyro.Unknown {
 		t.Fatalf("initial status = %v, want Unknown", got)
 	}
 	node.healthy.Store(false)
 	if err := checker.Check(context.Background(), node); err != nil {
 		t.Fatal(err)
 	}
-	if got := checker.Status(node.ID()); got != health.Healthy {
+	if got := checker.Status(node.ID()); got != gyro.Healthy {
 		t.Fatalf("status after one failure = %v, want Healthy", got)
 	}
 	if err := checker.Check(context.Background(), node); err != nil {
 		t.Fatal(err)
 	}
-	if got := checker.Status(node.ID()); got != health.Unhealthy {
+	if got := checker.Status(node.ID()); got != gyro.Unhealthy {
 		t.Fatalf("status after threshold = %v, want Unhealthy", got)
 	}
-	if snapshot := checker.Snapshot(); snapshot[node.ID()] != health.Unhealthy {
+	if snapshot := checker.Snapshot(); snapshot[node.ID()] != gyro.Unhealthy {
 		t.Fatalf("snapshot = %#v, want unhealthy node", snapshot)
 	}
 }

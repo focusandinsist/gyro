@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/health"
 	"github.com/focusandinsist/gyro/internal/routing"
 	"github.com/focusandinsist/gyro/internal/topology"
 )
@@ -509,7 +508,7 @@ func stringMapEqual(left, right map[string]string) bool {
 
 // updateHealthCheckerConfig updates the health checker configuration.
 func (c *Client) updateHealthCheckerConfig(newConfig gyro.HealthCheckerConfig) error {
-	if err := health.ValidateHealthCheckerConfig(newConfig); err != nil {
+	if err := gyro.ValidateHealthCheckerConfig(newConfig); err != nil {
 		return fmt.Errorf("invalid health checker config: %w", err)
 	}
 
