@@ -6,6 +6,9 @@ import (
 	"sync"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/health"
+	"github.com/focusandinsist/gyro/internal/policy"
+	"github.com/focusandinsist/gyro/internal/routing"
 )
 
 // Runtime owns the shared lifecycle of a routed adapter: locator construction,
@@ -13,7 +16,7 @@ import (
 // ownership of their connection and native-client types.
 type Runtime struct {
 	locator gyro.Locator
-	pool    *gyro.HealthAwarePool
+	pool    *routing.HealthAwarePool
 	cancel  context.CancelFunc
 
 	closeOnce sync.Once
@@ -22,13 +25,18 @@ type Runtime struct {
 
 // New builds a routed runtime from protocol-specific node creation logic.
 func New(addresses []string, locatorConfig gyro.LocatorConfig, healthConfig gyro.HealthCheckerConfig, idPrefix string, create func(gyro.NodeInfo) (gyro.Node, error), checker gyro.HealthChecker) (*Runtime, error) {
+	return NewWithPolicy(addresses, locatorConfig, healthConfig, idPrefix, create, checker, policy.PrimaryOnly{})
+}
+
+// NewWithPolicy makes adapter failover semantics explicit at construction.
+func NewWithPolicy(addresses []string, locatorConfig gyro.LocatorConfig, healthConfig gyro.HealthCheckerConfig, idPrefix string, create func(gyro.NodeInfo) (gyro.Node, error), checker gyro.HealthChecker, policy gyro.FailurePolicy) (*Runtime, error) {
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("at least one %s address is required", idPrefix)
 	}
 	if create == nil {
 		return nil, fmt.Errorf("node creator cannot be nil")
 	}
-	base, err := gyro.NewConsistentLocator(locatorConfig)
+	base, err := routing.NewLocator(locatorConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection locator: %w", err)
 	}
@@ -45,9 +53,9 @@ func New(addresses []string, locatorConfig gyro.LocatorConfig, healthConfig gyro
 		}
 	}
 	if checker == nil {
-		checker = gyro.NewDefaultHealthChecker(healthConfig)
+		checker = health.NewDefaultHealthChecker(healthConfig)
 	}
-	pool := gyro.NewHealthAwarePoolWithChecker(base, checker)
+	pool := routing.NewHealthAwarePoolWithCheckerAndPolicy(base, checker, policy)
 	healthCtx, cancel := context.WithCancel(context.Background())
 	pool.StartHealthMonitoring(healthCtx)
 	return &Runtime{locator: pool, pool: pool, cancel: cancel}, nil
@@ -56,33 +64,8 @@ func New(addresses []string, locatorConfig gyro.LocatorConfig, healthConfig gyro
 // Locator returns the health-aware routed locator.
 func (r *Runtime) Locator() gyro.Locator { return r.locator }
 
-// Pool returns the health-aware pool for adapter-specific operations.
-func (r *Runtime) Pool() *gyro.HealthAwarePool { return r.pool }
-
-// Replicas selects candidates and converts supported nodes to native clients.
-func (r *Runtime) Replicas(ctx context.Context, key string, count int, native func(gyro.Node) (any, bool)) ([]any, error) {
-	nodes, err := r.locator.GetReplicas(ctx, key, count)
-	if err != nil {
-		return nil, err
-	}
-	clients := make([]any, 0, len(nodes))
-	for _, node := range nodes {
-		if client, ok := native(node); ok && client != nil {
-			clients = append(clients, client)
-		}
-	}
-	return clients, nil
-}
-
-// All converts all supported nodes to native clients keyed by node ID.
-func (r *Runtime) All(native func(gyro.Node) (any, bool)) map[string]any {
-	clients := make(map[string]any)
-	for _, node := range r.locator.GetAllNodes() {
-		if client, ok := native(node); ok && client != nil {
-			clients[node.ID()] = client
-		}
-	}
-	return clients
+func (r *Runtime) BorrowNodeForKey(ctx context.Context, key string) (*routing.NodeLease, error) {
+	return r.pool.BorrowNodeForKey(ctx, key)
 }
 
 // Close stops health monitoring and closes all routed nodes once.

@@ -7,21 +7,25 @@ import (
 	"testing"
 	"time"
 
+	googlegrpc "google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/routing"
 )
 
-type testGRPCNativeClient struct {
-	address string
-}
-
 type testGRPCConnection struct {
-	native  *testGRPCNativeClient
+	native  *googlegrpc.ClientConn
 	healthy atomic.Bool
 	closed  atomic.Bool
 }
 
 func newTestGRPCConnection(address string) *testGRPCConnection {
-	connection := &testGRPCConnection{native: &testGRPCNativeClient{address: address}}
+	native, err := googlegrpc.NewClient(address, googlegrpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		panic(err)
+	}
+	connection := &testGRPCConnection{native: native}
 	connection.healthy.Store(true)
 	return connection
 }
@@ -35,7 +39,7 @@ func (c *testGRPCConnection) Ping(context.Context) error {
 
 func (c *testGRPCConnection) Close() error {
 	c.closed.Store(true)
-	return nil
+	return c.native.Close()
 }
 
 func (c *testGRPCConnection) IsConnected() bool {
@@ -44,7 +48,7 @@ func (c *testGRPCConnection) IsConnected() bool {
 
 func (c *testGRPCConnection) GetState() string { return "READY" }
 
-func (c *testGRPCConnection) GetNativeClient() any { return c.native }
+func (c *testGRPCConnection) GetNativeClient() *googlegrpc.ClientConn { return c.native }
 
 func TestGRPCConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	config := DefaultClientConfig()
@@ -74,9 +78,9 @@ func TestGRPCConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
-	pool, ok := client.locator.(*gyro.HealthAwarePool)
+	pool, ok := client.locator.(*routing.HealthAwarePool)
 	if !ok {
-		t.Fatalf("convenience client locator is %T, want *gyro.HealthAwarePool", client.locator)
+		t.Fatalf("convenience client locator is %T, want *routing.HealthAwarePool", client.locator)
 	}
 	key := findGRPCKeyForNode(t, client.locator, "grpc-1")
 	replicas, err := client.GetClientsForReplicas(context.Background(), key, 2)
@@ -93,11 +97,7 @@ func TestGRPCConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetClientForKey failed after primary became unhealthy: %v", err)
 	}
-	fallback, ok := native.(*testGRPCNativeClient)
-	if !ok {
-		t.Fatalf("native client is %T, want *testGRPCNativeClient", native)
-	}
-	if fallback.address == "grpc-1.test" {
+	if native.Target() == "grpc-1.test" {
 		t.Fatal("health-aware routing returned the unhealthy primary")
 	}
 
@@ -107,7 +107,7 @@ func TestGRPCConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetClientForKey failed after primary recovered: %v", err)
 	}
-	if native.(*testGRPCNativeClient).address != "grpc-1.test" {
+	if native.Target() != "grpc-1.test" {
 		t.Fatal("health-aware routing did not return to the recovered primary")
 	}
 
@@ -177,7 +177,7 @@ func findGRPCKeyForNode(t *testing.T, locator gyro.Locator, nodeID string) strin
 	return ""
 }
 
-func waitForGRPCNodeHealth(t *testing.T, pool *gyro.HealthAwarePool, nodeID string, healthy bool) {
+func waitForGRPCNodeHealth(t *testing.T, pool *routing.HealthAwarePool, nodeID string, healthy bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	ticker := time.NewTicker(time.Millisecond)

@@ -11,7 +11,9 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/policy"
 	"github.com/focusandinsist/gyro/internal/routed"
+	"github.com/focusandinsist/gyro/internal/routing"
 )
 
 // Connection is the adapter connection abstraction.
@@ -19,7 +21,7 @@ type Connection interface {
 	Ping(ctx context.Context) error
 	Close() error
 	IsConnected() bool
-	GetNativeClient() any
+	GetNativeClient() *goredis.Client
 }
 
 // DefaultConnection wraps a real go-redis client.
@@ -75,7 +77,7 @@ func (c *DefaultConnection) Ping(ctx context.Context) error {
 
 // GetNativeClient returns the underlying *redis.Client for direct use with
 // the full go-redis API.
-func (c *DefaultConnection) GetNativeClient() any {
+func (c *DefaultConnection) GetNativeClient() *goredis.Client {
 	return c.client
 }
 
@@ -126,7 +128,7 @@ func (rn *Node) Close() error {
 	return rn.conn.Close()
 }
 
-func (rn *Node) GetNativeClient() any {
+func (rn *Node) GetNativeClient() *goredis.Client {
 	rn.mu.RLock()
 	defer rn.mu.RUnlock()
 
@@ -158,6 +160,33 @@ type Client struct {
 	runtime *routed.Runtime
 }
 
+// ClientLease keeps a routed Redis client alive until Release is called.
+type ClientLease struct {
+	client *goredis.Client
+	node   *routing.NodeLease
+}
+
+func (l *ClientLease) Client() *goredis.Client { return l.client }
+func (l *ClientLease) Release() error          { return l.node.Release() }
+
+func (rc *Client) BorrowClientForKey(ctx context.Context, key string) (*ClientLease, error) {
+	lease, err := rc.runtime.BorrowNodeForKey(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	node, ok := lease.Node().(*Node)
+	if !ok {
+		_ = lease.Release()
+		return nil, fmt.Errorf("routed node is not a Redis node")
+	}
+	client := node.GetNativeClient()
+	if client == nil {
+		_ = lease.Release()
+		return nil, fmt.Errorf("node %s has no healthy client", node.ID())
+	}
+	return &ClientLease{client: client, node: lease}, nil
+}
+
 // NewClient creates a client-side sharded Redis cluster client. Each
 // address gets its own go-redis connection; routing between them is done
 // via consistent hashing.
@@ -181,30 +210,27 @@ func newClient(addresses []string, config *ClientConfig, factory *NodeFactory, h
 	if factory == nil {
 		factory = &NodeFactory{config: config, newConnection: NewConnection}
 	}
-	runtime, err := routed.New(addresses, config.Locator, config.HealthChecker, "redis", factory.CreateNode, healthChecker)
+	runtime, err := routed.NewWithPolicy(addresses, config.Locator, config.HealthChecker, "redis", factory.CreateNode, healthChecker, policy.HealthyCandidate{AllowUnknown: true})
 	if err != nil {
 		return nil, err
 	}
 	return &Client{locator: runtime.Locator(), config: config, runtime: runtime}, nil
 }
 
-func (rc *Client) GetClientForKey(ctx context.Context, key string) (any, error) {
-	node, err := rc.GetNodeForKey(ctx, key)
+// GetClientForKey returns the current native client. Use BorrowClientForKey
+// when the connection must remain open across a topology change.
+func (rc *Client) GetClientForKey(ctx context.Context, key string) (*goredis.Client, error) {
+	lease, err := rc.BorrowClientForKey(ctx, key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get node for key '%s': %w", key, err)
+		return nil, fmt.Errorf("failed to get client for key '%s': %w", key, err)
 	}
+	defer lease.Release()
+	return lease.Client(), nil
+}
 
-	redisNode, ok := node.(*Node)
-	if !ok {
-		return nil, fmt.Errorf("node %s is not a Redis node", node.ID())
-	}
-
-	nativeClient := redisNode.GetNativeClient()
-	if nativeClient == nil {
-		return nil, fmt.Errorf("node %s has no healthy client", node.ID())
-	}
-
-	return nativeClient, nil
+// GetRedisClientForKey returns the typed Redis resource for a routed key.
+func (rc *Client) GetRedisClientForKey(ctx context.Context, key string) (*goredis.Client, error) {
+	return rc.GetClientForKey(ctx, key)
 }
 
 // GetNodeForKey returns the routed node metadata for observability and tests.
@@ -216,24 +242,35 @@ func (rc *Client) GetNodeForKey(ctx context.Context, key string) (gyro.Node, err
 	return node, nil
 }
 
-func (rc *Client) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]any, error) {
-	clients, err := rc.runtime.Replicas(ctx, key, replicaCount, nativeClient)
+// GetClientsForReplicas returns current candidates without health filtering
+// or leases. They may close when membership changes.
+func (rc *Client) GetClientsForReplicas(ctx context.Context, key string, replicaCount int) ([]*goredis.Client, error) {
+	nodes, err := rc.locator.GetReplicas(ctx, key, replicaCount)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get replicas for key '%s': %w", key, err)
+	}
+	clients := make([]*goredis.Client, 0, len(nodes))
+	for _, node := range nodes {
+		if redisNode, ok := node.(*Node); ok {
+			if client := redisNode.GetNativeClient(); client != nil {
+				clients = append(clients, client)
+			}
+		}
 	}
 	return clients, nil
 }
 
-func (rc *Client) GetAllClients() map[string]any {
-	return rc.runtime.All(nativeClient)
-}
-
-func nativeClient(node gyro.Node) (any, bool) {
-	redisNode, ok := node.(*Node)
-	if !ok {
-		return nil, false
+// GetAllClients returns a snapshot of current native clients.
+func (rc *Client) GetAllClients() map[string]*goredis.Client {
+	clients := make(map[string]*goredis.Client)
+	for _, node := range rc.locator.GetAllNodes() {
+		if redisNode, ok := node.(*Node); ok {
+			if client := redisNode.GetNativeClient(); client != nil {
+				clients[node.ID()] = client
+			}
+		}
 	}
-	return redisNode.GetNativeClient(), true
+	return clients
 }
 
 // Close closes all connections and releases resources.
