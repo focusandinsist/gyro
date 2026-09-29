@@ -12,7 +12,7 @@ type Client = internalclient.Client
 type Config = internalclient.Config
 type ConfigManager = internalclient.ConfigManager
 type ConfigWatcher = internalclient.ConfigWatcher
-type ConnectionConfig = internalclient.ConnectionConfig
+type ConnectionConfig = gyro.ConnectionConfig
 type ClientHealth = internalclient.ClientHealth
 type ClientTopologyStatus = internalclient.ClientTopologyStatus
 
@@ -24,4 +24,4 @@ func NewConfigManager(config *Config) *ConfigManager { return internalclient.New
 
 func DefaultConfig() *Config { return internalclient.DefaultConfig() }
 
-func DefaultConnectionConfig() ConnectionConfig { return internalclient.DefaultConnectionConfig() }
+func DefaultConnectionConfig() gyro.ConnectionConfig { return gyro.DefaultConnectionConfig() }

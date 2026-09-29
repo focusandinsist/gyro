@@ -7,12 +7,12 @@ Concrete selectors, failure policies, and resource pools live under
 
 ## Public Entry Points
 
-- `topology.go`, `routing.go`, `failure_api.go`: public routing and topology contracts.
+- `topology.go`, `routing.go`, `failure.go`: public routing and topology contracts.
 - `node.go`: runtime node and node-factory interfaces.
 - `connection.go`: protocol-neutral connection settings.
 - `discovery.go`: discovery contracts; use `discovery/static` for the
   reference implementation.
-- `topology_diff_api.go`: the public topology diff value returned by
+- `topology_diff.go`: the public topology diff value returned by
   `internal/topology`.
 
 ## Client and Runtime Implementation
@@ -23,9 +23,8 @@ Concrete selectors, failure policies, and resource pools live under
 ## Public Contracts
 
 - `health_types.go`: health contracts, configuration, and statistics.
-- `locator.go` remains the stateful node-membership seam used by the internal
-  client and routed runtime. Health checking and pooling are owned by
-  `internal/health`.
+- `locator.go` defines the transitional node-routing contract and hash settings.
+  The implementation and node membership live in `internal/routing`.
 
 ## Internal Implementations
 
@@ -33,6 +32,7 @@ Concrete selectors, failure policies, and resource pools live under
 - `../internal/policy`: primary-only and healthy-candidate policies.
 - `../internal/resource`: resource pool ownership and leases.
 - `../internal/health`: probing, threshold state, worker lifecycle, and health snapshots.
+- `../internal/routing`: route coordination and node membership.
 - `../internal/client`: dynamic discovery/configuration client implementation.
 - `../client`: public facade for the dynamic client.
 

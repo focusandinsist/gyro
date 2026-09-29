@@ -12,3 +12,14 @@ type ConnectionConfig struct {
 	ReadTimeout    time.Duration `json:"read_timeout"`
 	WriteTimeout   time.Duration `json:"write_timeout"`
 }
+
+func DefaultConnectionConfig() ConnectionConfig {
+	return ConnectionConfig{
+		MaxIdleConns:   10,
+		MaxActiveConns: 100,
+		IdleTimeout:    5 * time.Minute,
+		ConnectTimeout: 10 * time.Second,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   30 * time.Second,
+	}
+}

@@ -22,8 +22,6 @@ import (
 	"context"
 	"fmt"
 
-	goredis "github.com/redis/go-redis/v9"
-
 	redisadapter "github.com/focusandinsist/gyro/adapters/redis"
 )
 
@@ -42,16 +40,16 @@ func main() {
 	ctx := context.Background()
 
 	// 按 key 路由到对应节点,拿到的是原生 *redis.Client,直接用 go-redis 的完整 API
-	native, err := client.GetClientForKey(ctx, "user:123")
+	lease, err := client.BorrowClientForKey(ctx, "user:123")
 	if err != nil {
 		panic(err)
 	}
-	redisConn := native.(*goredis.Client)
-
-	if err := redisConn.Set(ctx, "user:123", "Alice", 0).Err(); err != nil {
+	defer lease.Release()
+	native := lease.Client()
+	if err := native.Set(ctx, "user:123", "Alice", 0).Err(); err != nil {
 		panic(err)
 	}
-	val, _ := redisConn.Get(ctx, "user:123").Result()
+	val, _ := native.Get(ctx, "user:123").Result()
 	fmt.Println(val)
 }
 ```
@@ -108,7 +106,7 @@ repository/
 └── docs/                  # 详细文档
 ```
 
-核心包的入口导航在 `gyro/gyro.go`；公开节点接口在 `gyro/node.go`。动态 Client
+核心包的契约导航在 `gyro/README.md`；公开节点接口在 `gyro/node.go`。动态 Client
 通过 `client` facade 使用，静态 discovery 和默认健康 checker 分别通过
 `discovery/static` 与 `health` facade 使用；具体生命周期实现位于 `internal/`。
 

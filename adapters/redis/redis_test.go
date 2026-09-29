@@ -7,23 +7,20 @@ import (
 	"testing"
 	"time"
 
-	clientpkg "github.com/focusandinsist/gyro/client"
+	goredis "github.com/redis/go-redis/v9"
+
 	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/health"
+	"github.com/focusandinsist/gyro/internal/routing"
 )
 
-type testRedisNativeClient struct {
-	address string
-}
-
 type testRedisConnection struct {
-	native  *testRedisNativeClient
+	native  *goredis.Client
 	healthy atomic.Bool
 	closed  atomic.Bool
 }
 
 func newTestRedisConnection(address string) *testRedisConnection {
-	connection := &testRedisConnection{native: &testRedisNativeClient{address: address}}
+	connection := &testRedisConnection{native: goredis.NewClient(&goredis.Options{Addr: address})}
 	connection.healthy.Store(true)
 	return connection
 }
@@ -37,14 +34,14 @@ func (c *testRedisConnection) Ping(context.Context) error {
 
 func (c *testRedisConnection) Close() error {
 	c.closed.Store(true)
-	return nil
+	return c.native.Close()
 }
 
 func (c *testRedisConnection) IsConnected() bool {
 	return !c.closed.Load() && c.healthy.Load()
 }
 
-func (c *testRedisConnection) GetNativeClient() any { return c.native }
+func (c *testRedisConnection) GetNativeClient() *goredis.Client { return c.native }
 
 func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	config := DefaultClientConfig()
@@ -56,7 +53,7 @@ func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	connections := make(map[string]*testRedisConnection)
 	factory := &NodeFactory{
 		config: config,
-		newConnection: func(address string, _ clientpkg.ConnectionConfig) (Connection, error) {
+		newConnection: func(address string, _ gyro.ConnectionConfig) (Connection, error) {
 			connection := newTestRedisConnection(address)
 			connections[address] = connection
 			return connection, nil
@@ -74,9 +71,9 @@ func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
-	pool, ok := client.locator.(*health.HealthAwarePool)
+	pool, ok := client.locator.(*routing.HealthAwarePool)
 	if !ok {
-		t.Fatalf("convenience client locator is %T, want *health.HealthAwarePool", client.locator)
+		t.Fatalf("convenience client locator is %T, want *routing.HealthAwarePool", client.locator)
 	}
 	key := findRedisKeyForNode(t, client.locator, "redis-1")
 	replicas, err := client.GetClientsForReplicas(context.Background(), key, 2)
@@ -93,11 +90,7 @@ func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetClientForKey failed after primary became unhealthy: %v", err)
 	}
-	fallback, ok := native.(*testRedisNativeClient)
-	if !ok {
-		t.Fatalf("native client is %T, want *testRedisNativeClient", native)
-	}
-	if fallback.address == "redis-1.test" {
+	if native.Options().Addr == "redis-1.test" {
 		t.Fatal("health-aware routing returned the unhealthy primary")
 	}
 
@@ -107,7 +100,7 @@ func TestRedisConvenienceClientUsesHealthAwareFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetClientForKey failed after primary recovered: %v", err)
 	}
-	if native.(*testRedisNativeClient).address != "redis-1.test" {
+	if native.Options().Addr != "redis-1.test" {
 		t.Fatal("health-aware routing did not return to the recovered primary")
 	}
 
@@ -169,7 +162,7 @@ func findRedisKeyForNode(t *testing.T, locator gyro.Locator, nodeID string) stri
 	return ""
 }
 
-func waitForRedisNodeHealth(t *testing.T, pool *health.HealthAwarePool, nodeID string, healthy bool) {
+func waitForRedisNodeHealth(t *testing.T, pool *routing.HealthAwarePool, nodeID string, healthy bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	ticker := time.NewTicker(time.Millisecond)

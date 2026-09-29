@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/routing"
 )
 
 // Client coordinates routing, service discovery, health monitoring, and
@@ -26,10 +27,10 @@ type Client struct {
 // Keeping them separate from clientState makes runtime transitions explicit.
 type clientDeps struct {
 	serviceName   string
-	discovery     ServiceDiscovery
+	discovery     gyro.ServiceDiscovery
 	configManager *ConfigManager
-	nodeFactory   NodeFactory
-	healthChecker HealthChecker
+	nodeFactory   gyro.NodeFactory
+	healthChecker gyro.HealthChecker
 }
 
 // clientRun is the owned runtime instance for one Start-to-Stop interval.
@@ -38,7 +39,7 @@ type clientDeps struct {
 type clientRun struct {
 	ctx    context.Context
 	cancel context.CancelFunc
-	pool   *healthAwarePool
+	pool   *routing.HealthAwarePool
 	done   chan struct{}
 }
 
@@ -47,10 +48,10 @@ type clientRun struct {
 // nodeInfos and health fields are the latest published snapshots.
 type clientState struct {
 	run            *clientRun
-	prepared       *healthAwarePool
-	nodeFactory    NodeFactory
-	nodeInfos      map[string]NodeInfo
-	topologyStore  TopologyStore
+	prepared       *routing.HealthAwarePool
+	nodeFactory    gyro.NodeFactory
+	nodeInfos      map[string]gyro.NodeInfo
+	topologyStore  gyro.TopologyStore
 	retiredSources map[string]struct{}
 	configWatcher  bool
 
@@ -64,7 +65,7 @@ type clientState struct {
 // ClientTopologyStatus exposes the last accepted complete topology and whether
 // its source watch is currently stale. The snapshot remains valid while stale.
 type ClientTopologyStatus struct {
-	Snapshot    TopologySnapshot
+	Snapshot    gyro.TopologySnapshot
 	HasSnapshot bool
 	Stale       bool
 }
@@ -99,7 +100,7 @@ func (c *Client) SetLogger(logger *slog.Logger) {
 	}
 	c.logger.Store(logger)
 	c.stateMu.RLock()
-	var locator Locator
+	var locator gyro.Locator
 	if c.state.run != nil {
 		locator = c.state.run.pool
 	} else {
@@ -117,7 +118,7 @@ func (c *Client) log() *slog.Logger {
 
 // buildLocatorUnsafe builds a locator from a configuration snapshot without
 // publishing it. Discovery and node construction happen outside Client locks.
-func (c *Client) buildLocatorUnsafe(config *Config, nodeFactory NodeFactory) (Locator, []NodeInfo, error) {
+func (c *Client) buildLocatorUnsafe(config *Config, nodeFactory gyro.NodeFactory) (*routing.Locator, []gyro.NodeInfo, error) {
 	ctx := context.Background()
 
 	snapshot, err := c.deps.discovery.Discover(ctx, c.deps.serviceName)
@@ -134,7 +135,7 @@ func (c *Client) buildLocatorUnsafe(config *Config, nodeFactory NodeFactory) (Lo
 	}
 	sortNodeInfosByID(nodeInfos)
 
-	baseLocator, err := gyro.NewConsistentLocator(config.Locator)
+	baseLocator, err := routing.NewLocator(config.Locator)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create locator: %w", err)
 	}
@@ -174,7 +175,7 @@ func (c *Client) initialize() error {
 		return err
 	}
 
-	healthAwarePool := newHealthAwarePool(baseLocator, healthChecker)
+	healthAwarePool := routing.NewHealthAwarePoolWithChecker(baseLocator, healthChecker)
 	healthAwarePool.SetLogger(c.log())
 
 	c.stateMu.Lock()
@@ -184,7 +185,7 @@ func (c *Client) initialize() error {
 		return nil
 	}
 	c.state.prepared = healthAwarePool
-	c.state.nodeInfos = make(map[string]NodeInfo, len(nodeInfos))
+	c.state.nodeInfos = make(map[string]gyro.NodeInfo, len(nodeInfos))
 	for _, nodeInfo := range nodeInfos {
 		c.state.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
 	}
@@ -194,7 +195,7 @@ func (c *Client) initialize() error {
 }
 
 // getLocator returns the active underlying locator.
-func (c *Client) getLocator() Locator {
+func (c *Client) getLocator() gyro.Locator {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 	if c.state.run == nil {

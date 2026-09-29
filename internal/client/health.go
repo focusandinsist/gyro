@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/focusandinsist/gyro/gyro"
 )
 
 // ClientHealth represents the health status of a client.
@@ -38,7 +40,7 @@ func (c *Client) lastHealthCheckTime() time.Time {
 
 // GetNodeForKey returns the routed node metadata without exposing a native
 // protocol client. It is useful for observability and routing assertions.
-func (c *Client) GetNodeForKey(ctx context.Context, key string) (Node, error) {
+func (c *Client) GetNodeForKey(ctx context.Context, key string) (gyro.Node, error) {
 	locator := c.getLocator()
 	if locator == nil {
 		return nil, fmt.Errorf("client not started")
@@ -54,10 +56,10 @@ func (c *Client) IsHealthy() bool {
 }
 
 // GetStats returns client statistics.
-func (c *Client) GetStats() HealthAwarePoolStats {
+func (c *Client) GetStats() gyro.HealthAwarePoolStats {
 	locator := c.getLocator()
 	if locator == nil {
-		return HealthAwarePoolStats{}
+		return gyro.HealthAwarePoolStats{}
 	}
 
 	allNodes := locator.GetAllNodes()
@@ -69,7 +71,7 @@ func (c *Client) GetStats() HealthAwarePoolStats {
 		}
 	}
 
-	return HealthAwarePoolStats{
+	return gyro.HealthAwarePoolStats{
 		TotalNodes:     totalNodes,
 		HealthyNodes:   healthyCount,
 		UnhealthyNodes: totalNodes - healthyCount,

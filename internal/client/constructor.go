@@ -6,12 +6,17 @@
 // provide its own discovery, node factory, or health checker.
 package client
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/focusandinsist/gyro/gyro"
+	"github.com/focusandinsist/gyro/internal/topology"
+)
 
 // NewClient creates a client with application-provided discovery, node
 // factory, configuration, and health-checking dependencies. Most applications
 // should use a protocol adapter's convenience constructor instead.
-func NewClient(serviceName string, discovery ServiceDiscovery, configManager *ConfigManager, nodeFactory NodeFactory, healthChecker HealthChecker) (*Client, error) {
+func NewClient(serviceName string, discovery gyro.ServiceDiscovery, configManager *ConfigManager, nodeFactory gyro.NodeFactory, healthChecker gyro.HealthChecker) (*Client, error) {
 	if serviceName == "" {
 		return nil, fmt.Errorf("service name cannot be empty")
 	}
@@ -37,9 +42,9 @@ func NewClient(serviceName string, discovery ServiceDiscovery, configManager *Co
 			healthChecker: healthChecker,
 		},
 		state: clientState{
-			nodeInfos:      make(map[string]NodeInfo),
+			nodeInfos:      make(map[string]gyro.NodeInfo),
 			nodeFactory:    nodeFactory,
-			topologyStore:  NewTopologyStore(),
+			topologyStore:  topology.NewStore(),
 			retiredSources: make(map[string]struct{}),
 			// False until watchServiceNodes establishes its first watch.
 			serviceDiscoveryHealthy: false,

@@ -3,6 +3,8 @@ package client
 import (
 	"context"
 	"fmt"
+
+	"github.com/focusandinsist/gyro/gyro"
 )
 
 // Start starts the client with service discovery and config watching.
@@ -75,7 +77,7 @@ func (c *Client) Stop() error {
 }
 
 // GetLocator returns the underlying locator for direct access.
-func (c *Client) GetLocator() Locator { return c.getLocator() }
+func (c *Client) GetLocator() gyro.Locator { return c.getLocator() }
 
 // Close closes the client.
 func (c *Client) Close() error { return c.Stop() }

@@ -1,5 +1,5 @@
 # Internal Health
 
-This package owns probing, threshold transitions, health snapshots, worker
-lifecycle, and health-aware routing composition. It depends on public gyro
-contracts and does not own protocol-specific connections.
+This package owns probing, threshold transitions, health snapshots, and worker
+lifecycle. Route composition lives in `internal/routing`; node resource ownership
+lives in `internal/resource`.

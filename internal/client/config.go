@@ -3,7 +3,6 @@ package client
 import (
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/focusandinsist/gyro/gyro"
 )
@@ -11,9 +10,9 @@ import (
 // Config is the configuration for Gyro clients, composed of the
 // individual component configs below.
 type Config struct {
-	Locator       LocatorConfig       `json:"locator"`
-	HealthChecker HealthCheckerConfig `json:"health_checker"`
-	Connection    ConnectionConfig    `json:"connection"`
+	Locator       gyro.LocatorConfig       `json:"locator"`
+	HealthChecker gyro.HealthCheckerConfig `json:"health_checker"`
+	Connection    gyro.ConnectionConfig    `json:"connection"`
 }
 
 // ConfigManager manages configuration updates.
@@ -24,27 +23,12 @@ type ConfigManager struct {
 	watchers []ConfigWatcher
 }
 
-// ConnectionConfig configures connection-specific behavior.
-type ConnectionConfig = gyro.ConnectionConfig
-
-// DefaultConnectionConfig returns connection defaults suitable for adapters.
-func DefaultConnectionConfig() ConnectionConfig {
-	return ConnectionConfig{
-		MaxIdleConns:   10,
-		MaxActiveConns: 100,
-		IdleTimeout:    5 * time.Minute,
-		ConnectTimeout: 10 * time.Second,
-		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
-	}
-}
-
 // DefaultConfig returns a complete configuration with the default component settings.
 func DefaultConfig() *Config {
 	return &Config{
-		Locator:       DefaultLocatorConfig(),
-		HealthChecker: DefaultHealthCheckerConfig(),
-		Connection:    DefaultConnectionConfig(),
+		Locator:       gyro.DefaultLocatorConfig(),
+		HealthChecker: gyro.DefaultHealthCheckerConfig(),
+		Connection:    gyro.DefaultConnectionConfig(),
 	}
 }
 

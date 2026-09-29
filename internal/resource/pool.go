@@ -43,7 +43,55 @@ func NewResourcePool(factory gyro.ResourceFactory) (*ResourcePool, error) {
 	return &ResourcePool{factory: factory, active: make(map[string]*resourceEntry)}, nil
 }
 
+// NewOwnedPool accepts resources created by a protocol adapter. Ownership
+// transfers on a successful Add and remains here until removal or Close.
+func NewOwnedPool() *ResourcePool {
+	return &ResourcePool{active: make(map[string]*resourceEntry)}
+}
+
+func (p *ResourcePool) Add(resource gyro.Resource) error {
+	if resource == nil || resource.MemberID() == "" {
+		return gyro.ErrResourceUnavailable
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return ErrResourcePoolClosed
+	}
+	if _, exists := p.active[resource.MemberID()]; exists {
+		return fmt.Errorf("resource %s already exists", resource.MemberID())
+	}
+	p.active[resource.MemberID()] = &resourceEntry{resource: resource}
+	return nil
+}
+
+func (p *ResourcePool) Remove(memberID string) error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return ErrResourcePoolClosed
+	}
+	entry := p.active[memberID]
+	if entry == nil {
+		p.mu.Unlock()
+		return ErrResourceUnavailable
+	}
+	delete(p.active, memberID)
+	entry.pending = true
+	if entry.refs != 0 || entry.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	entry.closed = true
+	resource := entry.resource
+	p.mu.Unlock()
+	return resource.Close()
+}
+
 func (p *ResourcePool) Replace(ctx context.Context, members []gyro.Member) error {
+	if p.factory == nil {
+		return fmt.Errorf("owned resource pool does not create resources")
+	}
 	if ctx == nil {
 		return gyro.ErrNilContext
 	}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/focusandinsist/gyro/gyro"
 	"github.com/focusandinsist/gyro/internal/health"
+	"github.com/focusandinsist/gyro/internal/routing"
 	"github.com/focusandinsist/gyro/internal/topology"
 )
 
@@ -42,7 +43,7 @@ func (c *Client) updateServiceDiscoveryHealth(run *clientRun, healthy bool, err 
 	}
 }
 
-func (c *Client) acceptTopologySnapshot(ctx context.Context, snapshot TopologySnapshot, allowSourceReset bool) (TopologySnapshot, error) {
+func (c *Client) acceptTopologySnapshot(ctx context.Context, snapshot gyro.TopologySnapshot, allowSourceReset bool) (gyro.TopologySnapshot, error) {
 	c.topologyMu.Lock()
 	defer c.topologyMu.Unlock()
 
@@ -51,23 +52,23 @@ func (c *Client) acceptTopologySnapshot(ctx context.Context, snapshot TopologySn
 	_, retired := c.state.retiredSources[snapshot.Revision.Source]
 	c.stateMu.RUnlock()
 	if store == nil {
-		return TopologySnapshot{}, ErrInvalidSnapshot
+		return gyro.TopologySnapshot{}, gyro.ErrInvalidSnapshot
 	}
 	if retired {
-		return TopologySnapshot{}, ErrIncomparableRevision
+		return gyro.TopologySnapshot{}, gyro.ErrIncomparableRevision
 	}
 
 	current, hasCurrent := store.Snapshot()
 	if !hasCurrent || current.Revision.Source == snapshot.Revision.Source {
 		if err := store.Publish(ctx, snapshot); err != nil {
-			return TopologySnapshot{}, err
+			return gyro.TopologySnapshot{}, err
 		}
 	} else {
 		if !allowSourceReset {
-			return TopologySnapshot{}, ErrIncomparableRevision
+			return gyro.TopologySnapshot{}, gyro.ErrIncomparableRevision
 		}
 		if err := store.ResetSource(ctx, snapshot); err != nil {
-			return TopologySnapshot{}, err
+			return gyro.TopologySnapshot{}, err
 		}
 		c.stateMu.Lock()
 		if c.state.retiredSources == nil {
@@ -82,12 +83,12 @@ func (c *Client) acceptTopologySnapshot(ctx context.Context, snapshot TopologySn
 	c.stateMu.Unlock()
 	accepted, ok := store.Snapshot()
 	if !ok {
-		return TopologySnapshot{}, ErrInvalidSnapshot
+		return gyro.TopologySnapshot{}, gyro.ErrInvalidSnapshot
 	}
 	return accepted, nil
 }
 
-func (c *Client) reconcileAcceptedTopology(run *clientRun, snapshot TopologySnapshot, previous TopologySnapshot, hasPrevious bool) {
+func (c *Client) reconcileAcceptedTopology(run *clientRun, snapshot gyro.TopologySnapshot, previous gyro.TopologySnapshot, hasPrevious bool) {
 	if hasPrevious {
 		diff := topology.Diff(previous, snapshot)
 		if len(diff.Added) == 0 && len(diff.Removed) == 0 && len(diff.Updated) == 0 {
@@ -108,7 +109,7 @@ func (c *Client) reconcileAcceptedTopology(run *clientRun, snapshot TopologySnap
 	c.reconcileServiceNodes(run, nodeInfos)
 }
 
-func (c *Client) reconcileServiceNodesFromReset(run *clientRun, snapshot TopologySnapshot) {
+func (c *Client) reconcileServiceNodesFromReset(run *clientRun, snapshot gyro.TopologySnapshot) {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 	c.stateMu.RLock()
@@ -121,20 +122,17 @@ func (c *Client) reconcileServiceNodesFromReset(run *clientRun, snapshot Topolog
 		ids = append(ids, id)
 	}
 	locator := run.pool
-	healthChecker := c.deps.healthChecker
 	nodeFactory := c.state.nodeFactory
 	c.stateMu.RUnlock()
 	sort.Strings(ids)
 	for _, id := range ids {
-		if err := locator.RemoveNodeContext(run.ctx, id); err == nil && healthChecker != nil {
-			healthChecker.RemoveNode(id)
-		}
+		_ = locator.RemoveNodeContext(run.ctx, id)
 	}
 	nodeInfos, err := nodeInfosFromTopologySnapshot(snapshot)
 	if err != nil {
 		return
 	}
-	current := make(map[string]NodeInfo, len(nodeInfos))
+	current := make(map[string]gyro.NodeInfo, len(nodeInfos))
 	for _, info := range nodeInfos {
 		node, createErr := nodeFactory.CreateNode(info)
 		if createErr != nil {
@@ -145,9 +143,6 @@ func (c *Client) reconcileServiceNodesFromReset(run *clientRun, snapshot Topolog
 			continue
 		}
 		current[info.ID] = cloneNodeInfo(info)
-		if healthChecker != nil {
-			healthChecker.AddNode(node)
-		}
 	}
 	c.stateMu.Lock()
 	if c.state.run == run && run.ctx.Err() == nil {
@@ -156,23 +151,23 @@ func (c *Client) reconcileServiceNodesFromReset(run *clientRun, snapshot Topolog
 	c.stateMu.Unlock()
 }
 
-func (c *Client) currentTopologySnapshot() (TopologySnapshot, bool) {
+func (c *Client) currentTopologySnapshot() (gyro.TopologySnapshot, bool) {
 	c.stateMu.RLock()
 	store := c.state.topologyStore
 	c.stateMu.RUnlock()
 	if store == nil {
-		return TopologySnapshot{}, false
+		return gyro.TopologySnapshot{}, false
 	}
 	return store.Snapshot()
 }
 
-func nodeInfosFromTopologySnapshot(snapshot TopologySnapshot) ([]NodeInfo, error) {
-	nodeInfos := make([]NodeInfo, len(snapshot.Members))
+func nodeInfosFromTopologySnapshot(snapshot gyro.TopologySnapshot) ([]gyro.NodeInfo, error) {
+	nodeInfos := make([]gyro.NodeInfo, len(snapshot.Members))
 	for i, member := range snapshot.Members {
 		if len(member.Endpoints) == 0 || member.Endpoints[0].Address == "" {
-			return nil, ErrInvalidSnapshot
+			return nil, gyro.ErrInvalidSnapshot
 		}
-		nodeInfos[i] = NodeInfo{
+		nodeInfos[i] = gyro.NodeInfo{
 			ID:       member.ID,
 			Address:  member.Endpoints[0].Address,
 			Metadata: cloneStringMap(member.Attributes),
@@ -246,7 +241,7 @@ func (c *Client) watchServiceNodes(run *clientRun) {
 
 // processServiceWatch processes events from the service discovery watch channel.
 // It returns true if the watch failed and should be retried, false for normal shutdown.
-func (c *Client) processServiceWatch(run *clientRun, stream TopologyStream) bool {
+func (c *Client) processServiceWatch(run *clientRun, stream gyro.TopologyStream) bool {
 	defer stream.Close()
 	firstSnapshot := true
 	for {
@@ -264,7 +259,7 @@ func (c *Client) processServiceWatch(run *clientRun, stream TopologyStream) bool
 		previous, hasPrevious := c.currentTopologySnapshot()
 		accepted, err := c.acceptTopologySnapshot(run.ctx, snapshot, firstSnapshot)
 		if err != nil {
-			if errors.Is(err, ErrStaleRevision) || errors.Is(err, ErrRevisionConflict) {
+			if errors.Is(err, gyro.ErrStaleRevision) || errors.Is(err, gyro.ErrRevisionConflict) {
 				c.log().Debug("service discovery snapshot ignored", "error", err)
 				continue
 			}
@@ -278,7 +273,7 @@ func (c *Client) processServiceWatch(run *clientRun, stream TopologyStream) bool
 
 // reconcileServiceNodes serializes topology preparation with configuration
 // replacement and publishes only if this run still owns the client state.
-func (c *Client) reconcileServiceNodes(run *clientRun, newNodeInfos []NodeInfo) {
+func (c *Client) reconcileServiceNodes(run *clientRun, newNodeInfos []gyro.NodeInfo) {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 
@@ -288,21 +283,20 @@ func (c *Client) reconcileServiceNodes(run *clientRun, newNodeInfos []NodeInfo) 
 		return
 	}
 	locator := run.pool
-	healthChecker := c.deps.healthChecker
 	nodeFactory := c.state.nodeFactory
-	currentInfos := make(map[string]NodeInfo, len(c.state.nodeInfos))
+	currentInfos := make(map[string]gyro.NodeInfo, len(c.state.nodeInfos))
 	for nodeID, nodeInfo := range c.state.nodeInfos {
 		currentInfos[nodeID] = cloneNodeInfo(nodeInfo)
 	}
 	c.stateMu.RUnlock()
 	currentNodes := locator.GetAllNodes()
 
-	currentNodeMap := make(map[string]Node)
+	currentNodeMap := make(map[string]gyro.Node)
 	for _, node := range currentNodes {
 		currentNodeMap[node.ID()] = node
 	}
 
-	newNodeMap := make(map[string]NodeInfo)
+	newNodeMap := make(map[string]gyro.NodeInfo)
 	for _, nodeInfo := range newNodeInfos {
 		newNodeMap[nodeInfo.ID] = nodeInfo
 	}
@@ -315,7 +309,7 @@ func (c *Client) reconcileServiceNodes(run *clientRun, newNodeInfos []NodeInfo) 
 	}
 	sort.Strings(nodesToRemove)
 
-	var nodesToAdd []NodeInfo
+	var nodesToAdd []gyro.NodeInfo
 	for nodeID, nodeInfo := range newNodeMap {
 		if _, exists := currentNodeMap[nodeID]; !exists {
 			nodesToAdd = append(nodesToAdd, nodeInfo)
@@ -323,7 +317,7 @@ func (c *Client) reconcileServiceNodes(run *clientRun, newNodeInfos []NodeInfo) 
 	}
 	sortNodeInfosByID(nodesToAdd)
 
-	var nodesToUpdate []NodeInfo
+	var nodesToUpdate []gyro.NodeInfo
 	for nodeID, newNodeInfo := range newNodeMap {
 		if currentNode, exists := currentNodeMap[nodeID]; exists {
 			oldNodeInfo, hasOldInfo := currentInfos[nodeID]
@@ -339,9 +333,6 @@ func (c *Client) reconcileServiceNodes(run *clientRun, newNodeInfos []NodeInfo) 
 			c.log().Error("failed to remove node", "node_id", nodeID, "error", err)
 		} else {
 			delete(currentInfos, nodeID)
-			if healthChecker != nil {
-				healthChecker.RemoveNode(nodeID)
-			}
 			c.log().Info("node removed", "node_id", nodeID)
 		}
 	}
@@ -358,9 +349,6 @@ func (c *Client) reconcileServiceNodes(run *clientRun, newNodeInfos []NodeInfo) 
 			c.log().Error("failed to add node", "node_id", nodeInfo.ID, "error", err)
 		} else {
 			currentInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
-			if healthChecker != nil {
-				healthChecker.AddNode(node)
-			}
 			c.log().Info("node added", "node_id", nodeInfo.ID)
 		}
 	}
@@ -369,9 +357,6 @@ func (c *Client) reconcileServiceNodes(run *clientRun, newNodeInfos []NodeInfo) 
 		if err := locator.RemoveNodeContext(run.ctx, nodeInfo.ID); err != nil {
 			c.log().Error("failed to remove node for update", "node_id", nodeInfo.ID, "error", err)
 			continue
-		}
-		if healthChecker != nil {
-			healthChecker.RemoveNode(nodeInfo.ID)
 		}
 
 		node, err := nodeFactory.CreateNode(nodeInfo)
@@ -385,9 +370,6 @@ func (c *Client) reconcileServiceNodes(run *clientRun, newNodeInfos []NodeInfo) 
 			c.log().Error("failed to add updated node", "node_id", nodeInfo.ID, "error", err)
 		} else {
 			currentInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
-			if healthChecker != nil {
-				healthChecker.AddNode(node)
-			}
 			c.log().Info("node updated", "node_id", nodeInfo.ID)
 		}
 	}
@@ -421,21 +403,21 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *Config) error {
 	healthCheckerChanged := !c.healthCheckerConfigEqual(oldConfig.HealthChecker, newConfig.HealthChecker)
 
 	var (
-		replacementLocator   Locator
-		replacementFactory   NodeFactory
-		replacementNodeInfos []NodeInfo
+		replacementLocator   *routing.Locator
+		replacementFactory   gyro.NodeFactory
+		replacementNodeInfos []gyro.NodeInfo
 	)
 
 	if locatorChanged || connectionChanged {
 		replacementFactory = currentFactory
 		if connectionChanged {
-			configurableFactory, ok := currentFactory.(ConnectionConfigurableNodeFactory)
+			configurableFactory, ok := currentFactory.(gyro.ConnectionConfigurableNodeFactory)
 			if !ok {
 				return fmt.Errorf("node factory does not support connection configuration updates")
 			}
 
 			var err error
-			replacementFactory, err = configurableFactory.WithConnectionConfig(gyro.ConnectionConfig(newConfig.Connection))
+			replacementFactory, err = configurableFactory.WithConnectionConfig(newConfig.Connection)
 			if err != nil {
 				return fmt.Errorf("failed to prepare node factory for connection config update: %w", err)
 			}
@@ -472,7 +454,7 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *Config) error {
 		c.stateMu.Lock()
 		if c.state.run == run && run.ctx.Err() == nil {
 			c.state.nodeFactory = replacementFactory
-			c.state.nodeInfos = make(map[string]NodeInfo, len(replacementNodeInfos))
+			c.state.nodeInfos = make(map[string]gyro.NodeInfo, len(replacementNodeInfos))
 			for _, nodeInfo := range replacementNodeInfos {
 				c.state.nodeInfos[nodeInfo.ID] = cloneNodeInfo(nodeInfo)
 			}
@@ -487,7 +469,7 @@ func (c *Client) handleConfigChange(oldConfig, newConfig *Config) error {
 }
 
 // locatorConfigEqual compares two locator configurations.
-func (c *Client) locatorConfigEqual(old, new LocatorConfig) bool {
+func (c *Client) locatorConfigEqual(old, new gyro.LocatorConfig) bool {
 	return old.PartitionCount == new.PartitionCount &&
 		old.ReplicationFactor == new.ReplicationFactor &&
 		old.Load == new.Load &&
@@ -495,7 +477,7 @@ func (c *Client) locatorConfigEqual(old, new LocatorConfig) bool {
 }
 
 // healthCheckerConfigEqual compares two health checker configurations.
-func (c *Client) healthCheckerConfigEqual(old, new HealthCheckerConfig) bool {
+func (c *Client) healthCheckerConfigEqual(old, new gyro.HealthCheckerConfig) bool {
 	return old.Enabled == new.Enabled &&
 		old.Interval == new.Interval &&
 		old.Timeout == new.Timeout &&
@@ -504,7 +486,7 @@ func (c *Client) healthCheckerConfigEqual(old, new HealthCheckerConfig) bool {
 }
 
 // connectionConfigEqual compares two connection configurations.
-func (c *Client) connectionConfigEqual(old, new ConnectionConfig) bool {
+func (c *Client) connectionConfigEqual(old, new gyro.ConnectionConfig) bool {
 	return old.MaxIdleConns == new.MaxIdleConns &&
 		old.MaxActiveConns == new.MaxActiveConns &&
 		old.IdleTimeout == new.IdleTimeout &&
@@ -526,12 +508,12 @@ func stringMapEqual(left, right map[string]string) bool {
 }
 
 // updateHealthCheckerConfig updates the health checker configuration.
-func (c *Client) updateHealthCheckerConfig(newConfig HealthCheckerConfig) error {
+func (c *Client) updateHealthCheckerConfig(newConfig gyro.HealthCheckerConfig) error {
 	if err := health.ValidateHealthCheckerConfig(newConfig); err != nil {
 		return fmt.Errorf("invalid health checker config: %w", err)
 	}
 
-	checker, ok := c.deps.healthChecker.(ConfigurableHealthChecker)
+	checker, ok := c.deps.healthChecker.(gyro.ConfigurableHealthChecker)
 	if !ok {
 		return fmt.Errorf("health checker does not support runtime configuration")
 	}

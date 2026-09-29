@@ -44,12 +44,11 @@ func TestRuntimeNativeTraversalAndClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	native := func(node gyro.Node) (any, bool) { return node.Address(), true }
-	all := runtime.All(native)
-	if len(all) != 2 || all["test-1"] != "first" || all["test-2"] != "second" {
-		t.Fatalf("unexpected native clients: %v", all)
+	all := runtime.Locator().GetAllNodes()
+	if len(all) != 2 {
+		t.Fatalf("unexpected nodes: %v", all)
 	}
-	replicas, err := runtime.Replicas(context.Background(), "key", 2, native)
+	replicas, err := runtime.Locator().GetReplicas(context.Background(), "key", 2)
 	if err != nil || len(replicas) != 2 {
 		t.Fatalf("replicas = %v, err = %v", replicas, err)
 	}
