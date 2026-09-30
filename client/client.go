@@ -4,8 +4,8 @@
 package client
 
 import (
-	"github.com/focusandinsist/gyro/gyro"
-	internalclient "github.com/focusandinsist/gyro/internal/client"
+	"gyro/gyro"
+	internalclient "gyro/internal/client"
 )
 
 type Client = internalclient.Client
@@ -16,12 +16,30 @@ type ConnectionConfig = gyro.ConnectionConfig
 type ClientHealth = internalclient.ClientHealth
 type ClientTopologyStatus = internalclient.ClientTopologyStatus
 
-func NewClient(serviceName string, discovery gyro.ServiceDiscovery, configManager *ConfigManager, nodeFactory gyro.NodeFactory, healthChecker gyro.HealthChecker) (*Client, error) {
-	return internalclient.NewClient(serviceName, discovery, configManager, nodeFactory, healthChecker)
+func NewClient(
+	serviceName string,
+	discovery gyro.ServiceDiscovery,
+	configManager *ConfigManager,
+	nodeFactory gyro.NodeFactory,
+	healthChecker gyro.HealthChecker,
+) (*Client, error) {
+	return internalclient.NewClient(
+		serviceName,
+		discovery,
+		configManager,
+		nodeFactory,
+		healthChecker,
+	)
 }
 
-func NewConfigManager(config *Config) *ConfigManager { return internalclient.NewConfigManager(config) }
+func NewConfigManager(config *Config) *ConfigManager {
+	return internalclient.NewConfigManager(config)
+}
 
-func DefaultConfig() *Config { return internalclient.DefaultConfig() }
+func DefaultConfig() *Config {
+	return internalclient.DefaultConfig()
+}
 
-func DefaultConnectionConfig() gyro.ConnectionConfig { return gyro.DefaultConnectionConfig() }
+func DefaultConnectionConfig() gyro.ConnectionConfig {
+	return gyro.DefaultConnectionConfig()
+}

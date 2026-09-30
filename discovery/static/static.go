@@ -3,8 +3,8 @@
 package static
 
 import (
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/topology"
+	"gyro/gyro"
+	"gyro/internal/topology"
 )
 
 type ServiceDiscovery = topology.StaticDiscovery

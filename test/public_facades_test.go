@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/focusandinsist/gyro/discovery/static"
-	gyrohealth "github.com/focusandinsist/gyro/health"
+	gyrohealth "gyro/health"
+	"gyro/discovery/static"
 )
 
 func TestPublicRuntimeFacadesExposeInternalImplementations(t *testing.T) {

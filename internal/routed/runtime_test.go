@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/focusandinsist/gyro/gyro"
+	"gyro/gyro"
 )
 
 type testNode struct {

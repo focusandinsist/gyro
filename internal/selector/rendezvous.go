@@ -6,7 +6,7 @@ import (
 	"sort"
 
 	"github.com/cespare/xxhash/v2"
-	"github.com/focusandinsist/gyro/gyro"
+	"gyro/gyro"
 )
 
 // RendezvousSelector ranks every member independently by a deterministic

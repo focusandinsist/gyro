@@ -9,9 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/resource"
-	"github.com/focusandinsist/gyro/internal/selector"
+	"gyro/gyro"
+	"gyro/internal/resource"
+	"gyro/internal/selector"
 )
 
 // Locator binds pure candidate selection to adapter nodes. ResourcePool is the

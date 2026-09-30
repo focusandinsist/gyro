@@ -16,10 +16,10 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/policy"
-	"github.com/focusandinsist/gyro/internal/routed"
-	"github.com/focusandinsist/gyro/internal/routing"
+	"gyro/gyro"
+	"gyro/internal/policy"
+	"gyro/internal/routed"
+	"gyro/internal/routing"
 )
 
 type Connection interface {

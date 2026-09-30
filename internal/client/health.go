@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/focusandinsist/gyro/gyro"
+	"gyro/gyro"
 )
 
 // ClientHealth represents the health status of a client.

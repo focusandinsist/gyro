@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/selector"
+	"gyro/gyro"
+	"gyro/internal/selector"
 )
 
 func TestRendezvousSelectorIsDeterministicAndOrderIndependent(t *testing.T) {

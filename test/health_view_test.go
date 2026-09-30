@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/health"
+	"gyro/gyro"
+	"gyro/health"
 )
 
 type healthViewNode struct{}

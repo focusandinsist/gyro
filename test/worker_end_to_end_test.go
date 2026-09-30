@@ -5,11 +5,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/policy"
-	"github.com/focusandinsist/gyro/internal/resource"
-	"github.com/focusandinsist/gyro/internal/selector"
-	"github.com/focusandinsist/gyro/internal/topology"
+	"gyro/gyro"
+	"gyro/internal/policy"
+	"gyro/internal/resource"
+	"gyro/internal/selector"
+	"gyro/internal/topology"
 )
 
 type workerResource struct {

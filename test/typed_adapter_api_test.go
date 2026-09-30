@@ -3,8 +3,8 @@ package test
 import (
 	"context"
 
-	grpcadapter "github.com/focusandinsist/gyro/adapters/grpc"
-	redisadapter "github.com/focusandinsist/gyro/adapters/redis"
+	grpcadapter "gyro/adapters/grpc"
+	redisadapter "gyro/adapters/redis"
 	goredis "github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 )

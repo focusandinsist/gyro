@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/topology"
+	"gyro/gyro"
+	"gyro/internal/topology"
 )
 
 func TestInternalTopologyStoreRejectsStaleSnapshots(t *testing.T) {

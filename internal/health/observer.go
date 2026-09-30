@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/focusandinsist/gyro/gyro"
+	"gyro/gyro"
 )
 
 // Observer owns health membership and observations, never node resources.

@@ -8,9 +8,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/routing"
-	"github.com/focusandinsist/gyro/internal/topology"
+	"gyro/gyro"
+	"gyro/internal/routing"
+	"gyro/internal/topology"
 )
 
 // updateServiceDiscoveryHealth updates the service discovery health status.

@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/resource"
+	"gyro/gyro"
+	"gyro/internal/resource"
 )
 
 type fakeResource struct {

@@ -9,8 +9,8 @@ package client
 import (
 	"fmt"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/topology"
+	"gyro/gyro"
+	"gyro/internal/topology"
 )
 
 // NewClient creates a client with application-provided discovery, node

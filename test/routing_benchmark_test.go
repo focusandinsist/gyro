@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/resource"
-	"github.com/focusandinsist/gyro/internal/selector"
+	"gyro/gyro"
+	"gyro/internal/resource"
+	"gyro/internal/selector"
 )
 
 func benchmarkSnapshot(size int) gyro.TopologySnapshot {

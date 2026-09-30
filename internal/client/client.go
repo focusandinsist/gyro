@@ -8,8 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/routing"
+	"gyro/gyro"
+	"gyro/internal/routing"
 )
 
 // Client coordinates routing, service discovery, health monitoring, and

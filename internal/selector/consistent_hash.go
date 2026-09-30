@@ -6,7 +6,8 @@ import (
 	"sort"
 
 	"github.com/focusandinsist/consistent-go/consistent"
-	"github.com/focusandinsist/gyro/gyro"
+
+	"gyro/gyro"
 )
 
 // ConsistentHashSelector orders topology members with the same consistent-go

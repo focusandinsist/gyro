@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/policy"
+	"gyro/gyro"
+	"gyro/internal/policy"
 )
 
 type testHealthView map[string]gyro.HealthStatus
