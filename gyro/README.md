@@ -17,7 +17,7 @@ Concrete selectors, failure policies, and resource pools live under
 
 ## Client and Runtime Implementation
 
-- `../client`: public facade backed by `../internal/client`.
+- `../client`: dynamic discovery/configuration client and its runtime implementation.
 - `../internal/routed`: adapter shared lifecycle composition.
 
 ## Public Contracts
@@ -33,8 +33,7 @@ Concrete selectors, failure policies, and resource pools live under
 - `../internal/resource`: resource pool ownership and leases.
 - `../internal/health`: probing, threshold state, worker lifecycle, and health snapshots.
 - `../internal/routing`: route coordination and node membership.
-- `../internal/client`: dynamic discovery/configuration client implementation.
-- `../client`: public facade for the dynamic client.
+- `../client`: dynamic discovery/configuration client implementation.
 
 ## Tests
 

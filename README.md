@@ -101,14 +101,15 @@ repository/
 ├── adapters/              # 外部技术适配器
 │   ├── redis/             # Redis 用户入口和适配器(go-redis)
 │   └── grpc/              # gRPC 用户入口和适配器(grpc-go)
-├── internal/              # 按 topology/selector/health/policy/resource/client 拆分的实现
-├── client/                # 动态 discovery/configuration 的公共 facade
+├── internal/              # 按 topology/selector/health/policy/resource/routing 拆分的实现
+├── client/                # 动态 discovery/configuration Client 及其实现
 └── docs/                  # 详细文档
 ```
 
 核心包的契约导航在 `gyro/README.md`；公开节点接口在 `gyro/node.go`。动态 Client
-通过 `client` facade 使用，静态 discovery 和默认健康 checker 分别通过
-`discovery/static` 与 `health` facade 使用；具体生命周期实现位于 `internal/`。
+通过 `client` 包使用；静态 discovery 和默认健康 checker 分别通过
+`discovery/static` 与 `health` 包使用。动态 Client 的生命周期实现归 `client/`，
+底层 routing、topology 和 health 实现仍位于 `internal/`。
 
 一致性哈希算法本身已经抽成独立的库:[focusandinsist/consistent-go](https://github.com/focusandinsist/consistent-go)。
 
