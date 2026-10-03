@@ -3,7 +3,7 @@
 package static
 
 import (
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/topology"
 )
 

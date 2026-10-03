@@ -3,7 +3,7 @@
 package health
 
 import (
-	"gyro/gyro"
+	"gyro"
 	internalhealth "gyro/internal/health"
 )
 

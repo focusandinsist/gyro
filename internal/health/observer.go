@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"gyro/gyro"
+	"gyro"
 )
 
 // Observer owns health membership and observations, never node resources.

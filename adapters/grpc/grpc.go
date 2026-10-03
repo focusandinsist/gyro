@@ -16,7 +16,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/policy"
 	"gyro/internal/routed"
 	"gyro/internal/routing"

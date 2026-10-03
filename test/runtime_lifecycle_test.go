@@ -10,7 +10,7 @@ import (
 	clientpkg "gyro/client"
 	gyrohealth "gyro/health"
 	"gyro/discovery/static"
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/health"
 	"gyro/internal/policy"
 	"gyro/internal/resource"

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/health"
 	"gyro/internal/policy"
 	"gyro/internal/routing"

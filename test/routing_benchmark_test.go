@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/resource"
 	"gyro/internal/selector"
 )
@@ -31,7 +31,7 @@ func BenchmarkRendezvousSelector(b *testing.B) {
 }
 
 func BenchmarkConsistentHashSelector(b *testing.B) {
-	sel, err := selector.NewConsistentHashSelector(gyro.DefaultLocatorConfig())
+	sel, err := gyro.NewConsistentHashSelector(gyro.DefaultLocatorConfig())
 	if err != nil {
 		b.Fatal(err)
 	}

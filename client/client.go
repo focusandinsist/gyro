@@ -3,7 +3,7 @@ package client
 import (
 	"fmt"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/topology"
 )
 

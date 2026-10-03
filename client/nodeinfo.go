@@ -3,7 +3,7 @@ package client
 import (
 	"sort"
 
-	"gyro/gyro"
+	"gyro"
 )
 
 func cloneNodeInfo(node gyro.NodeInfo) gyro.NodeInfo {

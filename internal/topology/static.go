@@ -7,7 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"gyro/gyro"
+	"gyro"
 )
 
 // StaticDiscovery is an in-memory complete-snapshot discovery source for

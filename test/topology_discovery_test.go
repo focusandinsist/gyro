@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"gyro/discovery/static"
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/topology"
 )
 

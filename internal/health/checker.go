@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"gyro/gyro"
+	"gyro"
 )
 
 // DefaultHealthChecker periodically probes registered nodes and publishes

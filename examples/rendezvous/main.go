@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/selector"
 )
 

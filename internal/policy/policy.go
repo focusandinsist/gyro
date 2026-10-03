@@ -3,7 +3,7 @@ package policy
 import (
 	"context"
 
-	"gyro/gyro"
+	"gyro"
 )
 
 // FailurePolicy converts a selector result and health observations into one

@@ -11,9 +11,7 @@ Gyro 是一个基于一致性哈希的 Go 客户端侧分片中间件（client-s
 
 ## 快速开始
 
-```bash
-go get github.com/focusandinsist/gyro/gyro@latest
-```
+只需要按 key 选择节点时，使用根包，不需要 Redis、gRPC 或健康检查：
 
 ```go
 package main
@@ -22,7 +20,35 @@ import (
 	"context"
 	"fmt"
 
-	redisadapter "github.com/focusandinsist/gyro/adapters/redis"
+	"gyro"
+)
+
+func main() {
+	router, err := gyro.NewRouter([]gyro.Member{
+		{ID: "worker-a", Endpoints: []gyro.Endpoint{{Address: "worker-a:8080"}}},
+		{ID: "worker-b", Endpoints: []gyro.Endpoint{{Address: "worker-b:8080"}}},
+	}, gyro.DefaultLocatorConfig())
+	if err != nil {
+		panic(err)
+	}
+	member, err := router.Route(context.Background(), "task-42")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(member.ID, member.Endpoints[0].Address)
+}
+```
+
+完整程序见 [examples/router/main.go](examples/router/main.go)。需要原生 Redis 客户端时：
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	redisadapter "gyro/adapters/redis"
 )
 
 func main() {
@@ -60,9 +86,9 @@ func main() {
 
 ```go
 import (
-    dynamicclient "github.com/focusandinsist/gyro/client"
-    staticdiscovery "github.com/focusandinsist/gyro/discovery/static"
-    gyrohealth "github.com/focusandinsist/gyro/health"
+    dynamicclient "gyro/client"
+    staticdiscovery "gyro/discovery/static"
+    gyrohealth "gyro/health"
 )
 
 discovery := staticdiscovery.New([]string{
@@ -87,7 +113,7 @@ if err := client.Start(ctx); err != nil {
 native, err := client.GetClientForKey(ctx, "user:123")
 ```
 
-gRPC 用法结构上完全对称,把 `redisadapter` 换成 `github.com/focusandinsist/gyro/adapters/grpc`,拿到的原生客户端是 `*grpc.ClientConn`,自己用生成的 stub(如 `pb.NewUserServiceClient(conn)`)调用即可。gRPC 健康检查走的是标准 `grpc.health.v1.Health` 协议;如果后端服务没有注册这个健康检查服务,Gyro 会回退到用连接的连通性状态判断,不会因此把所有节点都判为不健康。
+gRPC 用法结构上完全对称,把 `redisadapter` 换成 `gyro/adapters/grpc`,拿到的原生客户端是 `*grpc.ClientConn`,自己用生成的 stub(如 `pb.NewUserServiceClient(conn)`)调用即可。gRPC 健康检查走的是标准 `grpc.health.v1.Health` 协议;如果后端服务没有注册这个健康检查服务,Gyro 会回退到用连接的连通性状态判断,不会因此把所有节点都判为不健康。
 
 ## 已知限制
 
@@ -97,7 +123,7 @@ gRPC 用法结构上完全对称,把 `redisadapter` 换成 `github.com/focusandi
 
 ```
 repository/
-├── gyro/                  # 稳定的领域模型、公共接口和错误
+├── gyro.go 等根目录文件   # package gyro：领域模型、公共接口和错误
 ├── adapters/              # 外部技术适配器
 │   ├── redis/             # Redis 用户入口和适配器(go-redis)
 │   └── grpc/              # gRPC 用户入口和适配器(grpc-go)
@@ -106,7 +132,7 @@ repository/
 └── docs/                  # 详细文档
 ```
 
-核心包的契约导航在 `gyro/README.md`；公开节点接口在 `gyro/node.go`。动态 Client
+根包说明在 `gyro.go`；公开节点接口在 `node.go`。动态 Client
 通过 `client` 包使用；静态 discovery 和默认健康 checker 分别通过
 `discovery/static` 与 `health` 包使用。动态 Client 的生命周期实现归 `client/`，
 底层 routing、topology 和 health 实现仍位于 `internal/`。

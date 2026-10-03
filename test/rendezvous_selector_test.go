@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/selector"
 )
 

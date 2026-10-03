@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"gyro/gyro"
+	"gyro"
 )
 
 // Start starts the client with service discovery and config watching.

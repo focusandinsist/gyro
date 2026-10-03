@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/health"
 )
 

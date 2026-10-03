@@ -6,7 +6,7 @@ import (
 	"sort"
 	"sync"
 
-	"gyro/gyro"
+	"gyro"
 )
 
 // Store is the internal implementation of gyro.TopologyStore. It owns one

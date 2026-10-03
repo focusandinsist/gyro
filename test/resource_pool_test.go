@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/resource"
 )
 

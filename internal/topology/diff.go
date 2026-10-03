@@ -1,6 +1,6 @@
 package topology
 
-import "gyro/gyro"
+import "gyro"
 
 // Diff computes a resource-neutral change plan between complete snapshots.
 func Diff(previous, current gyro.TopologySnapshot) gyro.TopologyDiff {

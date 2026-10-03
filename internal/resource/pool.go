@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"gyro/gyro"
+	"gyro"
 )
 
 var ErrPoolClosed = errors.New("resource pool is closed")

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/routing"
 )
 

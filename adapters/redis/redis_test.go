@@ -9,7 +9,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/routing"
 )
 

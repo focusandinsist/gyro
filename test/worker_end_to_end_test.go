@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/policy"
 	"gyro/internal/resource"
 	"gyro/internal/selector"

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"gyro/gyro"
+	"gyro"
 )
 
 // Config is the configuration for Gyro clients, composed of the

@@ -10,7 +10,7 @@ import (
 	googlegrpc "google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/routing"
 )
 

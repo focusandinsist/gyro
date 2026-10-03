@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"gyro/gyro"
+	"gyro"
 )
 
 type contractSelector struct{}

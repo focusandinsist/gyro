@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"gyro/gyro"
+	"gyro"
 	"gyro/internal/routing"
 	"gyro/internal/topology"
 )
