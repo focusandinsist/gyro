@@ -10,10 +10,10 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/policy"
-	"github.com/focusandinsist/gyro/internal/routed"
-	"github.com/focusandinsist/gyro/internal/routing"
+	"gyro"
+	"gyro/internal/policy"
+	"gyro/internal/routed"
+	"gyro/internal/routing"
 )
 
 // Connection is the adapter connection abstraction.

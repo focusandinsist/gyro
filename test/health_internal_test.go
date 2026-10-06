@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/health"
+	"gyro"
+	"gyro/internal/health"
 )
 
 type internalHealthNode struct {

@@ -6,7 +6,7 @@ import (
 	"sort"
 
 	"github.com/cespare/xxhash/v2"
-	"github.com/focusandinsist/gyro/gyro"
+	"gyro"
 )
 
 // RendezvousSelector ranks every member independently by a deterministic
@@ -78,4 +78,24 @@ func rendezvousScore(seed, key, memberID string) uint64 {
 	var encoded [8]byte
 	binary.LittleEndian.PutUint64(encoded[:], hasher.Sum64())
 	return binary.LittleEndian.Uint64(encoded[:])
+}
+
+func normalizeSnapshot(snapshot gyro.TopologySnapshot) (gyro.TopologySnapshot, error) {
+	if snapshot.Revision.Source == "" {
+		return gyro.TopologySnapshot{}, gyro.ErrInvalidSnapshot
+	}
+	result := snapshot
+	result.Members = append([]gyro.Member(nil), snapshot.Members...)
+	seen := make(map[string]struct{}, len(result.Members))
+	for _, member := range result.Members {
+		if member.ID == "" {
+			return gyro.TopologySnapshot{}, gyro.ErrInvalidSnapshot
+		}
+		if _, ok := seen[member.ID]; ok {
+			return gyro.TopologySnapshot{}, gyro.ErrInvalidSnapshot
+		}
+		seen[member.ID] = struct{}{}
+	}
+	sort.Slice(result.Members, func(i, j int) bool { return result.Members[i].ID < result.Members[j].ID })
+	return result, nil
 }

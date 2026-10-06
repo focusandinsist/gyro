@@ -3,15 +3,21 @@
 package health
 
 import (
-	"github.com/focusandinsist/gyro/gyro"
-	internalhealth "github.com/focusandinsist/gyro/internal/health"
+	"gyro"
+	internalhealth "gyro/internal/health"
 )
 
 type Checker = internalhealth.DefaultHealthChecker
 type Config = gyro.HealthCheckerConfig
 
-func NewChecker(config Config) *Checker { return internalhealth.NewDefaultHealthChecker(config) }
+func NewChecker(config Config) *Checker {
+	return internalhealth.NewDefaultHealthChecker(config)
+}
 
-func DefaultConfig() Config { return gyro.DefaultHealthCheckerConfig() }
+func DefaultConfig() Config {
+	return gyro.DefaultHealthCheckerConfig()
+}
 
-func ValidateConfig(config Config) error { return gyro.ValidateHealthCheckerConfig(config) }
+func ValidateConfig(config Config) error {
+	return gyro.ValidateHealthCheckerConfig(config)
+}

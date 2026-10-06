@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/topology"
+	"gyro"
+	"gyro/internal/topology"
 )
 
 func TestTopologyStorePublishesAndNormalizesCompleteSnapshots(t *testing.T) {

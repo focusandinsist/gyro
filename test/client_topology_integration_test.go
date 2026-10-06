@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	clientpkg "github.com/focusandinsist/gyro/client"
-	"github.com/focusandinsist/gyro/gyro"
+	clientpkg "gyro/client"
+	"gyro"
 )
 
 func TestClientRetainsTopologyAndMarksItStaleAfterWatchClose(t *testing.T) {

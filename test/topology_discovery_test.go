@@ -6,9 +6,9 @@ import (
 	"io"
 	"testing"
 
-	"github.com/focusandinsist/gyro/discovery/static"
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/topology"
+	"gyro/discovery/static"
+	"gyro"
+	"gyro/internal/topology"
 )
 
 func TestStaticDiscoveryPublishesVersionedSnapshotsAndCoalescesUpdates(t *testing.T) {

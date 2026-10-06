@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/selector"
+	"gyro"
+	"gyro/internal/selector"
 )
 
 func main() {

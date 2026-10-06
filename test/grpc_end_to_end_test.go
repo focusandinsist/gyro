@@ -5,7 +5,7 @@ import (
 	"net"
 	"testing"
 
-	grpcadapter "github.com/focusandinsist/gyro/adapters/grpc"
+	grpcadapter "gyro/adapters/grpc"
 	"google.golang.org/grpc"
 )
 

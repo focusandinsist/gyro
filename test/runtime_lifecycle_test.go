@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	clientpkg "github.com/focusandinsist/gyro/client"
-	"github.com/focusandinsist/gyro/discovery/static"
-	"github.com/focusandinsist/gyro/gyro"
-	gyrohealth "github.com/focusandinsist/gyro/health"
-	"github.com/focusandinsist/gyro/internal/health"
-	"github.com/focusandinsist/gyro/internal/policy"
-	"github.com/focusandinsist/gyro/internal/resource"
-	"github.com/focusandinsist/gyro/internal/routing"
+	clientpkg "gyro/client"
+	gyrohealth "gyro/health"
+	"gyro/discovery/static"
+	"gyro"
+	"gyro/internal/health"
+	"gyro/internal/policy"
+	"gyro/internal/resource"
+	"gyro/internal/routing"
 )
 
 type trackedNode struct {

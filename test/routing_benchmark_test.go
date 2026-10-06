@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/resource"
-	"github.com/focusandinsist/gyro/internal/selector"
+	"gyro"
+	"gyro/internal/resource"
+	"gyro/internal/selector"
 )
 
 func benchmarkSnapshot(size int) gyro.TopologySnapshot {
@@ -31,7 +31,7 @@ func BenchmarkRendezvousSelector(b *testing.B) {
 }
 
 func BenchmarkConsistentHashSelector(b *testing.B) {
-	sel, err := selector.NewConsistentHashSelector(gyro.DefaultLocatorConfig())
+	sel, err := gyro.NewConsistentHashSelector(gyro.DefaultLocatorConfig())
 	if err != nil {
 		b.Fatal(err)
 	}

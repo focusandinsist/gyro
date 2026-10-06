@@ -9,8 +9,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/routing"
+	"gyro"
+	"gyro/internal/routing"
 )
 
 type testRedisConnection struct {

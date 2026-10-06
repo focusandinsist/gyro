@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/focusandinsist/gyro/gyro"
+	"gyro"
 )
 
 // DefaultHealthChecker periodically probes registered nodes and publishes

@@ -8,9 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/health"
-	"github.com/focusandinsist/gyro/internal/policy"
+	"gyro"
+	"gyro/internal/health"
+	"gyro/internal/policy"
 )
 
 // HealthAwarePool coordinates selection, policy and health observations. It

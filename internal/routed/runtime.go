@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/health"
-	"github.com/focusandinsist/gyro/internal/policy"
-	"github.com/focusandinsist/gyro/internal/routing"
+	"gyro"
+	"gyro/internal/health"
+	"gyro/internal/policy"
+	"gyro/internal/routing"
 )
 
 // Runtime owns the shared lifecycle of a routed adapter: locator construction,

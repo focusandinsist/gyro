@@ -9,9 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/resource"
-	"github.com/focusandinsist/gyro/internal/selector"
+	"gyro"
+	"gyro/internal/resource"
 )
 
 // Locator binds pure candidate selection to adapter nodes. ResourcePool is the
@@ -29,7 +28,7 @@ type Locator struct {
 var _ gyro.Locator = (*Locator)(nil)
 
 func NewLocator(config gyro.LocatorConfig) (*Locator, error) {
-	selection, err := selector.NewConsistentHashSelector(config)
+	selection, err := gyro.NewConsistentHashSelector(config)
 	if err != nil {
 		return nil, err
 	}

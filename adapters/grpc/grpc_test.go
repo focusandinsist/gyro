@@ -10,8 +10,8 @@ import (
 	googlegrpc "google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/routing"
+	"gyro"
+	"gyro/internal/routing"
 )
 
 type testGRPCConnection struct {

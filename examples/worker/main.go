@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/focusandinsist/gyro/gyro"
-	"github.com/focusandinsist/gyro/internal/resource"
-	"github.com/focusandinsist/gyro/internal/selector"
+	"gyro"
+	"gyro/internal/resource"
+	"gyro/internal/selector"
 )
 
 type workerResource struct{ id string }
