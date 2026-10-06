@@ -232,15 +232,13 @@ func (gn *Node) GetNativeClient() *grpc.ClientConn {
 }
 
 type ClientConfig struct {
-	Locator       gyro.LocatorConfig       `json:"locator"`
-	HealthChecker gyro.HealthCheckerConfig `json:"health_checker"`
-	Connection    gyro.ConnectionConfig    `json:"connection"`
+	gyro.RoutingConfig
+	Connection gyro.ConnectionConfig `json:"connection"`
 }
 
 func DefaultClientConfig() *ClientConfig {
 	return &ClientConfig{
-		Locator:       gyro.DefaultLocatorConfig(),
-		HealthChecker: gyro.DefaultHealthCheckerConfig(),
+		RoutingConfig: gyro.DefaultRoutingConfig(),
 		Connection:    gyro.DefaultConnectionConfig(),
 	}
 }
@@ -286,22 +284,15 @@ func NewClient(addresses []string, config *ClientConfig) (*Client, error) {
 }
 
 func newClient(addresses []string, config *ClientConfig, factory *NodeFactory, healthChecker gyro.HealthChecker) (*Client, error) {
-	if len(addresses) == 0 {
-		return nil, fmt.Errorf("at least one gRPC address is required")
-	}
 	if config == nil {
 		config = DefaultClientConfig()
 	}
 	configSnapshot := *config
 	config = &configSnapshot
-	if err := gyro.ValidateHealthCheckerConfig(config.HealthChecker); err != nil {
-		return nil, fmt.Errorf("invalid health checker config: %w", err)
-	}
-
 	if factory == nil {
 		factory = &NodeFactory{config: config, newConnection: NewConnection}
 	}
-	runtime, err := routed.NewWithPolicy(addresses, config.Locator, config.HealthChecker, "grpc", factory.CreateNode, healthChecker, policy.HealthyCandidate{AllowUnknown: true})
+	runtime, err := routed.NewFixedWithPolicy(addresses, config.RoutingConfig, "grpc", factory.CreateNode, healthChecker, policy.HealthyCandidate{AllowUnknown: true})
 	if err != nil {
 		return nil, err
 	}
