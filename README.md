@@ -1,17 +1,10 @@
 # Gyro
 
-Gyro 是一个基于一致性哈希的 Go 客户端侧分片中间件（client-side sharding）。它不是一个独立运行的代理进程，而是以库的形式嵌入到应用里：应用拿一个 key 向 Gyro 要节点，Gyro 在内部完成一致性哈希路由、健康检查和故障转移,应用不需要关心背后有多少台机器、机器何时增减。
+Gyro 是嵌入 Go 应用的一致性哈希路由库。最小用法是向根包提供成员和 key，取得对应成员；需要连接时，再使用 Redis 或 gRPC 适配器。动态服务发现和配置更新由 `client` 包提供。
 
-## 核心特性
+## 按 Key 选节点
 
-- **一致性哈希 + 固定分区**：默认 271 个分区、20 个虚拟节点,新增/删除节点时只重新分配受影响的分区(增量重平衡),而不是推倒重建整张哈希环。
-- **健康检查**:内置主动探测(可配置故障/恢复阈值、并发 worker pool)。
-- **服务发现 + 配置热更新**:节点列表变化时做增量 diff；locator 或 connection 配置变化时先构建替换资源,成功后切换并关闭旧资源。
-- **协议适配层**:核心抽象是 `Node`/`Locator`/`HealthChecker`,内置 Redis(`github.com/redis/go-redis/v9`)和 gRPC(`google.golang.org/grpc`)两个适配器,拿到的是真实的原生客户端(`*redis.Client` / `*grpc.ClientConn`),接口全部对外暴露,不做二次封装。
-
-## 快速开始
-
-只需要按 key 选择节点时，使用根包，不需要 Redis、gRPC 或健康检查：
+只需要选节点时，导入根包 `gyro`。`Router` 不创建连接、不探测健康，也不需要关闭。
 
 ```go
 package main
@@ -39,110 +32,48 @@ func main() {
 }
 ```
 
-完整程序见 [examples/router/main.go](examples/router/main.go)。需要原生 Redis 客户端时：
+运行：`go run ./examples/router`。`Candidates(ctx, key, count)` 返回包含首选成员的有序候选；`ReplaceMembers(ctx, members)` 原子替换成员集合。成员 ID 是哈希身份，同一集群的调用方应使用相同的 ID 和哈希配置。
+
+## 使用原生客户端
+
+固定地址 Redis 的调用片段（在已有 `ctx` 的函数内）：
 
 ```go
-package main
-
-import (
-	"context"
-	"fmt"
-
-	redisadapter "gyro/adapters/redis"
-)
-
-func main() {
-	// 三个 Redis 节点,按一致性哈希分片
-	client, err := redisadapter.NewCluster([]string{
-		"127.0.0.1:6379",
-		"127.0.0.1:6380",
-		"127.0.0.1:6381",
-	})
-	if err != nil {
-		panic(err)
-	}
-	defer client.Close()
-
-	ctx := context.Background()
-
-	// 按 key 路由到对应节点,拿到的是原生 *redis.Client,直接用 go-redis 的完整 API
-	lease, err := client.BorrowClientForKey(ctx, "user:123")
-	if err != nil {
-		panic(err)
-	}
-	defer lease.Release()
-	native := lease.Client()
-	if err := native.Set(ctx, "user:123", "Alice", 0).Err(); err != nil {
-		panic(err)
-	}
-	val, _ := native.Get(ctx, "user:123").Result()
-	fmt.Println(val)
-}
-```
-
-### 需要动态服务发现 / 配置热更新时
-
-上面的 `NewCluster` 是固定地址的便捷入口。如果节点列表会变化(比如接 Kubernetes Endpoints、注册中心),用更底层的依赖注入式 API:
-
-```go
-import (
-    dynamicclient "gyro/client"
-    staticdiscovery "gyro/discovery/static"
-    gyrohealth "gyro/health"
-)
-
-discovery := staticdiscovery.New([]string{
-	"127.0.0.1:6379", "127.0.0.1:6380", "127.0.0.1:6381",
-}) // 换成自己的 ServiceDiscovery 实现即可接入真实注册中心
-
-configManager := dynamicclient.NewConfigManager(dynamicclient.DefaultConfig())
-nodeFactory := redisadapter.NewNodeFactory()
-healthChecker := gyrohealth.NewChecker(gyrohealth.DefaultConfig())
-
-client, err := dynamicclient.NewClient("user-cache", discovery, configManager, nodeFactory, healthChecker)
+client, err := redisadapter.NewCluster([]string{"127.0.0.1:6379", "127.0.0.1:6380"})
 if err != nil {
-	panic(err)
+	return err
 }
 defer client.Close()
 
-ctx := context.Background()
-if err := client.Start(ctx); err != nil {
-	panic(err)
+lease, err := client.BorrowClientForKey(ctx, "user:123")
+if err != nil {
+	return err
 }
-
-native, err := client.GetClientForKey(ctx, "user:123")
+defer lease.Release()
+redisClient := lease.Client() // *redis.Client
 ```
 
-gRPC 用法结构上完全对称,把 `redisadapter` 换成 `gyro/adapters/grpc`,拿到的原生客户端是 `*grpc.ClientConn`,自己用生成的 stub(如 `pb.NewUserServiceClient(conn)`)调用即可。gRPC 健康检查走的是标准 `grpc.health.v1.Health` 协议;如果后端服务没有注册这个健康检查服务,Gyro 会回退到用连接的连通性状态判断,不会因此把所有节点都判为不健康。
+导入路径是 `gyro/adapters/redis`，完整的无服务构造与候选查询示例在 [examples/redis/main.go](examples/redis/main.go)。gRPC 使用 `gyro/adapters/grpc` 的相同构造和借用流程，`lease.Client()` 返回 `*grpc.ClientConn`，由应用创建自己的服务 stub；见 [examples/grpc/main.go](examples/grpc/main.go)。adapter 负责健康探测与连接关闭，借用的客户端应在使用完毕后释放租约。
 
-## 已知限制
+## 动态成员
 
-- gRPC 适配器目前只支持不加密的传输(`insecure.NewCredentials()`),没有暴露 TLS 配置。
+节点列表需要 watch 或配置热更新时，使用 `gyro/client` 注入 `ServiceDiscovery`、`ConfigManager`、`NodeFactory` 和 `HealthChecker`，调用 `Start(ctx)` 后读取路由结果，最后调用 `Close()`。完整示例在 [examples/dynamic/main.go](examples/dynamic/main.go)。`client.Client` 当前返回节点元数据；它没有返回 Redis/gRPC 原生客户端的 `GetClientForKey` 方法。
 
-## 项目结构
+## 目录
 
+- 根目录 `package gyro`：`Router`、成员/拓扑类型、选路契约和公共错误。
+- `adapters/redis`、`adapters/grpc`：协议连接、健康探测和类型化客户端。
+- `client`、`discovery/static`、`health`：动态成员入口及其可组合依赖。
+- `internal`：拓扑、健康、策略、资源和运行时实现。
+- [docs/quickstart.md](docs/quickstart.md)：按场景展开的可运行示例；[docs/architecture.md](docs/architecture.md)：当前包职责与运行边界。
+
+一致性哈希由 [consistent-go](https://github.com/focusandinsist/consistent-go) 实现。Gyro 不执行业务请求重试、数据复制或数据迁移；切换到健康候选也不代表数据已同步。当前 gRPC 适配器默认使用不加密传输，没有 TLS 配置入口。
+
+## 验证
+
+```bash
+go test ./...
+go vet ./...
 ```
-repository/
-├── gyro.go 等根目录文件   # package gyro：领域模型、公共接口和错误
-├── adapters/              # 外部技术适配器
-│   ├── redis/             # Redis 用户入口和适配器(go-redis)
-│   └── grpc/              # gRPC 用户入口和适配器(grpc-go)
-├── internal/              # 按 topology/selector/health/policy/resource/routing 拆分的实现
-├── client/                # 动态 discovery/configuration Client 及其实现
-└── docs/                  # 详细文档
-```
-
-根包说明在 `gyro.go`；公开节点接口在 `node.go`。动态 Client
-通过 `client` 包使用；静态 discovery 和默认健康 checker 分别通过
-`discovery/static` 与 `health` 包使用。动态 Client 的生命周期实现归 `client/`，
-底层 routing、topology 和 health 实现仍位于 `internal/`。
-
-一致性哈希算法本身已经抽成独立的库:[focusandinsist/consistent-go](https://github.com/focusandinsist/consistent-go)。
-
-## 文档
-
-更详细的架构设计、配置说明、各类专题文档见 [docs/](docs/README.md)。
-
-## License
 
 [MIT](LICENSE)
