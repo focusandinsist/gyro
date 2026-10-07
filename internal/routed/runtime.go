@@ -28,6 +28,19 @@ func New(addresses []string, locatorConfig gyro.LocatorConfig, healthConfig gyro
 	return NewWithPolicy(addresses, locatorConfig, healthConfig, idPrefix, create, checker, policy.PrimaryOnly{})
 }
 
+// NewFixedWithPolicy builds the shared runtime used by fixed-address protocol
+// adapters. Routing and health configuration is protocol-neutral; connection
+// creation remains owned by the adapter's node factory.
+func NewFixedWithPolicy(addresses []string, config gyro.RoutingConfig, idPrefix string, create func(gyro.NodeInfo) (gyro.Node, error), checker gyro.HealthChecker, failurePolicy gyro.FailurePolicy) (*Runtime, error) {
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("at least one %s address is required", idPrefix)
+	}
+	if err := gyro.ValidateHealthCheckerConfig(config.HealthChecker); err != nil {
+		return nil, fmt.Errorf("invalid health checker config: %w", err)
+	}
+	return NewWithPolicy(addresses, config.Locator, config.HealthChecker, idPrefix, create, checker, failurePolicy)
+}
+
 // NewWithPolicy makes adapter failover semantics explicit at construction.
 func NewWithPolicy(addresses []string, locatorConfig gyro.LocatorConfig, healthConfig gyro.HealthCheckerConfig, idPrefix string, create func(gyro.NodeInfo) (gyro.Node, error), checker gyro.HealthChecker, policy gyro.FailurePolicy) (*Runtime, error) {
 	if len(addresses) == 0 {

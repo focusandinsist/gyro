@@ -10,9 +10,8 @@ import (
 // Config is the configuration for Gyro clients, composed of the
 // individual component configs below.
 type Config struct {
-	Locator       gyro.LocatorConfig       `json:"locator"`
-	HealthChecker gyro.HealthCheckerConfig `json:"health_checker"`
-	Connection    gyro.ConnectionConfig    `json:"connection"`
+	gyro.RoutingConfig
+	Connection gyro.ConnectionConfig `json:"connection"`
 }
 
 // ConfigManager manages configuration updates.
@@ -26,8 +25,7 @@ type ConfigManager struct {
 // DefaultConfig returns a complete configuration with the default component settings.
 func DefaultConfig() *Config {
 	return &Config{
-		Locator:       gyro.DefaultLocatorConfig(),
-		HealthChecker: gyro.DefaultHealthCheckerConfig(),
+		RoutingConfig: gyro.DefaultRoutingConfig(),
 		Connection:    gyro.DefaultConnectionConfig(),
 	}
 }
